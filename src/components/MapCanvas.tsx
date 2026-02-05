@@ -1,22 +1,19 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
-import { ZoomIn, ZoomOut, RotateCcw, Pencil, Eraser, Circle } from "lucide-react";
+import { ZoomIn, ZoomOut, RotateCcw, Pencil, Eraser, Undo2 } from "lucide-react";
 import indiaMap from "@/assets/india-map.png";
 
 type Tool = "pan" | "draw" | "eraser";
 
-const COLORS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#8b5cf6", "#ec4899", "#000000"];
-const BRUSH_SIZES = [2, 4, 8, 12];
+const BRUSH_COLOR = "#3b82f6";
+const BRUSH_SIZE = 12;
 
 export default function MapCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [tool, setTool] = useState<Tool>("pan");
-  const [color, setColor] = useState("#ef4444");
-  const [brushSize, setBrushSize] = useState(4);
-  const [showColors, setShowColors] = useState(false);
-  const [showBrushSizes, setShowBrushSizes] = useState(false);
+  const [history, setHistory] = useState<ImageData[]>([]);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -40,6 +37,30 @@ export default function MapCanvas() {
       }
     }
   }, []);
+
+  const saveToHistory = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (ctx && canvas) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      setHistory(prev => [...prev, imageData]);
+    }
+  }, []);
+
+  const undo = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (ctx && canvas && history.length > 0) {
+      const newHistory = [...history];
+      newHistory.pop();
+      setHistory(newHistory);
+      
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (newHistory.length > 0) {
+        ctx.putImageData(newHistory[newHistory.length - 1], 0, 0);
+      }
+    }
+  }, [history]);
 
   const getCanvasCoordinates = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     const canvas = canvasRef.current;
@@ -68,12 +89,14 @@ export default function MapCanvas() {
     if (tool === "pan") return;
     e.stopPropagation();
     
+    saveToHistory();
+    
     const coords = getCanvasCoordinates(e);
     if (!coords) return;
 
     setIsDrawing(true);
     lastPos.current = coords;
-  }, [tool, getCanvasCoordinates]);
+  }, [tool, getCanvasCoordinates, saveToHistory]);
 
   const draw = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     if (!isDrawing || tool === "pan") return;
@@ -89,15 +112,15 @@ export default function MapCanvas() {
     ctx.beginPath();
     ctx.moveTo(lastPos.current.x, lastPos.current.y);
     ctx.lineTo(coords.x, coords.y);
-    ctx.strokeStyle = tool === "eraser" ? "#ffffff" : color;
-    ctx.lineWidth = tool === "eraser" ? brushSize * 4 : brushSize;
+    ctx.strokeStyle = tool === "eraser" ? "#ffffff" : BRUSH_COLOR;
+    ctx.lineWidth = tool === "eraser" ? BRUSH_SIZE * 4 : BRUSH_SIZE;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
     ctx.stroke();
 
     lastPos.current = coords;
-  }, [isDrawing, tool, color, brushSize, getCanvasCoordinates]);
+  }, [isDrawing, tool, getCanvasCoordinates]);
 
   const stopDrawing = useCallback(() => {
     setIsDrawing(false);
@@ -109,6 +132,7 @@ export default function MapCanvas() {
     const ctx = canvas?.getContext("2d");
     if (ctx && canvas) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      setHistory([]);
     }
   }, []);
 
@@ -131,7 +155,7 @@ export default function MapCanvas() {
                 <img
                   src={indiaMap}
                   alt=""
-                  className="map-image max-w-none select-none"
+                  className="map-image max-w-none select-none opacity-60 mix-blend-multiply"
                   draggable={false}
                 />
                 <canvas
@@ -200,76 +224,15 @@ export default function MapCanvas() {
 
               <div className="w-px h-6 bg-toolbar-divider mx-1" />
 
-              {/* Color Picker */}
-              <div className="relative">
-                <button
-                  onClick={() => {
-                    setShowColors(!showColors);
-                    setShowBrushSizes(false);
-                  }}
-                  className="toolbar-btn"
-                  title="Color"
-                >
-                  <div
-                    className="w-5 h-5 rounded-full border-2 border-white/50"
-                    style={{ backgroundColor: color }}
-                  />
-                </button>
-                {showColors && (
-                  <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 flex gap-1 p-2 bg-toolbar rounded-lg shadow-toolbar">
-                    {COLORS.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => {
-                          setColor(c);
-                          setShowColors(false);
-                        }}
-                        className={`w-6 h-6 rounded-full transition-transform hover:scale-110 ${
-                          color === c ? "ring-2 ring-white ring-offset-2 ring-offset-toolbar" : ""
-                        }`}
-                        style={{ backgroundColor: c }}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Brush Size */}
-              <div className="relative">
-                <button
-                  onClick={() => {
-                    setShowBrushSizes(!showBrushSizes);
-                    setShowColors(false);
-                  }}
-                  className="toolbar-btn"
-                  title="Brush Size"
-                >
-                  <Circle className="w-5 h-5" style={{ strokeWidth: brushSize / 2 }} />
-                </button>
-                {showBrushSizes && (
-                  <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 flex gap-2 p-2 bg-toolbar rounded-lg shadow-toolbar">
-                    {BRUSH_SIZES.map((size) => (
-                      <button
-                        key={size}
-                        onClick={() => {
-                          setBrushSize(size);
-                          setShowBrushSizes(false);
-                        }}
-                        className={`flex items-center justify-center w-8 h-8 rounded-full transition-colors ${
-                          brushSize === size ? "bg-white/20" : "hover:bg-white/10"
-                        }`}
-                      >
-                        <div
-                          className="rounded-full bg-white"
-                          style={{ width: size + 4, height: size + 4 }}
-                        />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="w-px h-6 bg-toolbar-divider mx-1" />
+              {/* Undo */}
+              <button
+                onClick={undo}
+                className="toolbar-btn"
+                disabled={history.length === 0}
+                title="Undo"
+              >
+                <Undo2 className="w-5 h-5" />
+              </button>
 
               {/* Clear */}
               <button
