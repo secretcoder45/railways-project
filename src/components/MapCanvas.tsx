@@ -137,7 +137,7 @@ export default function MapCanvas() {
   }, []);
 
   return (
-    <div ref={containerRef} className="relative w-full h-screen bg-canvas overflow-hidden">
+    <div ref={containerRef} className="relative w-full h-screen bg-canvas">
       <TransformWrapper
         initialScale={1}
         minScale={0.5}
@@ -148,20 +148,23 @@ export default function MapCanvas() {
         {({ zoomIn, zoomOut, resetTransform }) => (
           <>
             <TransformComponent
-              wrapperClass="!w-full !h-full"
-              contentClass="!w-full !h-full flex items-center justify-center"
+              wrapperClass="!w-full !h-full overflow-auto"
+              contentClass="!w-full flex items-start justify-center"
             >
-              <div className="relative">
+              <div className="relative inline-block">
                 <img
                   src={indiaMap}
                   alt=""
-                  className="map-image max-w-none select-none opacity-60 mix-blend-multiply"
+                  className="map-image block max-w-none select-none opacity-60 mix-blend-multiply"
                   draggable={false}
                 />
+
                 <canvas
                   ref={canvasRef}
-                  className="absolute top-0 left-0 w-full h-full"
-                  style={{ 
+                  className="absolute top-0 left-0"
+                  style={{
+                    width: "100%",
+                    height: "100%",
                     pointerEvents: tool === "pan" ? "none" : "auto",
                     touchAction: tool === "pan" ? "auto" : "none"
                   }}
