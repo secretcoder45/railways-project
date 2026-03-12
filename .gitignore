@@ -6,11 +6,52 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+pip-log.txt
+pip-delete-this-directory.txt
 
+# Node / frontend artifacts
 node_modules
 dist
 dist-ssr
 *.local
+*.tsbuildinfo
+
+# Env files
+.env
+.env.*
+!.env.example
+.envrc
+
+# Coverage and test caches
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+.cache
+
+# Python artifacts
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+.venv
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+site/
+target/
+
+# Backend local artifacts
+server/.env
+server/.env.*
+server/*.log
 
 # Editor directories and files
 .vscode/*
@@ -22,17 +63,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Env and local runtime
-.env
-.env.*
-!.env.example
-
-# Build/test cache
-coverage/
-*.tsbuildinfo
-
-# Backend local artifacts
-server/.env
-server/.env.*
-server/*.log
