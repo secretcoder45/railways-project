@@ -1,22 +1,29 @@
 import fs from "fs/promises";
 import path from "path";
 
-const DATA_ROOT = "/Users/palash/Desktop/Railways Project/data";
-const ROUTES_FILE = path.join(DATA_ROOT, "processed", "datameet_routes.jsonl");
+const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), "data");
+const ROUTES_FILE = process.env.ROUTES_FILE || path.join(DATA_ROOT, "processed", "datameet_routes.jsonl");
 
 // Bounds from india-states.geojson
 const MAP_BOUNDS = {
-  minLon: 68.10055226476403,
-  minLat: 6.766373153037801,
-  maxLon: 97.38755686813376,
-  maxLat: 37.07695799999999,
+  minLon: 68.18624878,
+  minLat: 6.75425577,
+  maxLon: 97.41516113,
+  maxLat: 35.50133133,
 };
 
 const RESAMPLE_POINTS = 200;
 const LENGTH_RATIO_MIN = 0.3;
 const LENGTH_RATIO_MAX = 3.5;
 const BBOX_PAD = 0.05;
-const TOP_K = 5;
+const MAX_RETURNED_ROUTES = 20;
+const SIMILARITY_MULTIPLIER = 1.22;
+const SIMILARITY_ABS_PAD = 0.025;
+const DENSE_CORRIDOR_CANDIDATES = 1200;
+const MIN_RETURN_DEFAULT = 1;
+const MIN_RETURN_DENSE = 3;
+const EXPANDED_MULTIPLIER = 1.35;
+const EXPANDED_ABS_PAD = 0.05;
 
 let routesCache = null;
 
@@ -141,7 +148,12 @@ function parseAnnotation(annotationGeoJson) {
 
 async function loadRoutes() {
   if (routesCache) return routesCache;
-  const content = await fs.readFile(ROUTES_FILE, "utf8");
+  let content;
+  try {
+    content = await fs.readFile(ROUTES_FILE, "utf8");
+  } catch {
+    throw new Error(`Unable to load routes dataset at ${ROUTES_FILE}. Set ROUTES_FILE or DATA_ROOT correctly.`);
+  }
   routesCache = content
     .split("\n")
     .map((line) => line.trim())
@@ -191,10 +203,34 @@ export async function runMatch(annotationGeoJson) {
 
   candidates.sort((a, b2) => a.distance_px_norm - b2.distance_px_norm);
 
+  let best = [];
+  if (candidates.length > 0) {
+    const bestDistance = candidates[0].distance_px_norm;
+    const denseCorridor = candidates.length >= DENSE_CORRIDOR_CANDIDATES;
+    const minReturn = denseCorridor ? MIN_RETURN_DENSE : MIN_RETURN_DEFAULT;
+
+    const smartCutoff = Math.max(bestDistance * SIMILARITY_MULTIPLIER, bestDistance + SIMILARITY_ABS_PAD);
+    best = candidates.filter((c) => c.distance_px_norm <= smartCutoff);
+
+    // If a corridor is dense, widen a bit to capture parallel trains.
+    if (best.length < minReturn) {
+      const expandedCutoff = Math.max(bestDistance * EXPANDED_MULTIPLIER, bestDistance + EXPANDED_ABS_PAD);
+      best = candidates.filter((c) => c.distance_px_norm <= expandedCutoff);
+    }
+
+    // // Keep a very small floor so we do not force many weak matches.
+    if (best.length < minReturn) {
+      best = candidates.slice(0, Math.min(minReturn, candidates.length));
+    }
+
+    best = best.slice(0, MAX_RETURNED_ROUTES);
+  }
+
   return {
     annotation_length_norm: annLen,
     candidates: candidates.length,
-    best: candidates.slice(0, TOP_K),
+    best_count: best.length,
+    best,
   };
 }
 

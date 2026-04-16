@@ -63,3 +63,6 @@ server/*.log
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime dataset and temp output
+runtime_data/

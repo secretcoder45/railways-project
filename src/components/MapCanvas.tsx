@@ -1,25 +1,31 @@
 import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import {
-  Map,
-  PenTool,
-  Upload,
-  Layers,
-  CheckCircle,
-  AlertTriangle,
-  Download,
-  Clock,
-  Crosshair,
+  Train,
+  Settings,
+  User,
+  Navigation,
   ZoomIn,
-  MousePointer2,
-  RotateCcw,
-  Undo2,
-  Eraser,
   ZoomOut,
+  Hand,
+  PenLine,
+  Eraser,
+  Download,
+  Layers,
+  Crosshair,
 } from "lucide-react";
 
 type Tool = "pan" | "draw" | "eraser";
 type Point = { x: number; y: number };
+
+type Station = {
+  seq?: number;
+  code?: string;
+  name?: string;
+  day?: number;
+  arrival?: string;
+  departure?: string;
+};
 
 type MatchRoute = {
   train_name?: string;
@@ -28,6 +34,7 @@ type MatchRoute = {
   distance_px_norm?: number;
   route_length_km?: number;
   station_count?: number;
+  stations?: Station[];
 };
 
 type MatchResponse = {
@@ -43,11 +50,13 @@ type MatchedRoute = {
   label: string;
   color: string;
   points: Point[];
+  glow: string;
   trainNo?: string;
   trainName?: string;
   distanceNorm?: number;
   routeLengthKm?: number;
   stationCount?: number;
+  stations?: Station[];
 };
 
 type GeoGeometry = {
@@ -68,17 +77,36 @@ type GeoFeatureCollection = {
 
 const BRUSH_COLOR = "#3b82f6";
 const BRUSH_SIZE = 12;
-const ROUTE_COLORS = ["#ef4444", "#f59e0b", "#10b981", "#8b5cf6", "#06b6d4"];
+const ROUTE_PALETTE = [
+  { line: "#ef4444", glow: "rgba(239,68,68,0.45)" },
+  { line: "#f59e0b", glow: "rgba(245,158,11,0.45)" },
+  { line: "#10b981", glow: "rgba(16,185,129,0.45)" },
+  { line: "#3b82f6", glow: "rgba(59,130,246,0.45)" },
+  { line: "#a855f7", glow: "rgba(168,85,247,0.5)" },
+];
 
 const MAP_BOUNDS = {
-  minLon: 68.10055226476403,
-  minLat: 6.766373153037801,
-  maxLon: 97.38755686813376,
-  maxLat: 37.07695799999999,
+  minLon: 68.18624878,
+  minLat: 6.75425577,
+  maxLon: 97.41516113,
+  maxLat: 35.50133133,
 };
 
 const MAP_WIDTH = 1000;
 const MAP_HEIGHT = 1000;
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const apiUrl = (p: string) => (API_BASE ? `${API_BASE}${p}` : p);
+
+function getRouteStyle(index: number) {
+  if (index < ROUTE_PALETTE.length) return ROUTE_PALETTE[index];
+
+  const hue = (index * 47) % 360;
+  const line = `hsl(${hue} 80% 58%)`;
+  const glow = `hsla(${hue} 90% 60% / 0.45)`;
+  return { line, glow };
+}
+
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
@@ -145,6 +173,64 @@ function polylineKm(coords: [number, number][]) {
   return sum;
 }
 
+function formatStationTime(station?: Station) {
+  if (!station) return "-";
+  const day = station.day ? `Day ${station.day}` : "Day ?";
+  const dep = station.departure && station.departure !== "None" ? station.departure.slice(0, 5) : "--:--";
+  const arr = station.arrival && station.arrival !== "None" ? station.arrival.slice(0, 5) : "--:--";
+  return `${day} | Arr ${arr} | Dep ${dep}`;
+}
+
+function estimateDurationHours(stations: Station[]) {
+  if (!stations.length) return null;
+
+  const parseMinutes = (t?: string) => {
+    if (!t || t === "None") return null;
+    const parts = t.split(":");
+    if (parts.length < 2) return null;
+    const hh = Number(parts[0]);
+    const mm = Number(parts[1]);
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+    return hh * 60 + mm;
+  };
+
+  const first = stations.find((s) => parseMinutes(s.departure) !== null || parseMinutes(s.arrival) !== null);
+  const last = [...stations].reverse().find((s) => parseMinutes(s.arrival) !== null || parseMinutes(s.departure) !== null);
+  if (!first || !last) return null;
+
+  const firstMins = parseMinutes(first.departure) ?? parseMinutes(first.arrival);
+  const lastMins = parseMinutes(last.arrival) ?? parseMinutes(last.departure);
+  const firstDay = first.day || 1;
+  const lastDay = last.day || firstDay;
+
+  if (firstMins == null || lastMins == null) return null;
+
+  const total = (lastDay - firstDay) * 1440 + (lastMins - firstMins);
+  if (total <= 0) return null;
+  return Math.round(total / 60);
+}
+
+function inferTrainType(name?: string) {
+  const n = (name || "").toUpperCase();
+  if (n.includes("SUPERFAST") || n.includes(" SF ") || n.endsWith(" SF") || n.startsWith("SF ")) return "Superfast Express";
+  if (n.includes("RAJDHANI")) return "Rajdhani";
+  if (n.includes("SHATABDI")) return "Shatabdi";
+  if (n.includes("DURONTO")) return "Duronto";
+  if (n.includes("EXP") || n.includes("EXPRESS")) return "Express";
+  if (n.includes("PASS")) return "Passenger";
+  return "N/A";
+}
+
+function isStoppingStation(station?: Station) {
+  if (!station) return false;
+  const arr = station.arrival && station.arrival !== "None" ? station.arrival : null;
+  const dep = station.departure && station.departure !== "None" ? station.departure : null;
+
+  if ((arr && !dep) || (!arr && dep)) return true;
+  if (arr && dep) return arr !== dep;
+  return false;
+}
+
 export default function MapCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mapWrapRef = useRef<HTMLDivElement>(null);
@@ -153,12 +239,11 @@ export default function MapCanvas() {
   const [tool, setTool] = useState<Tool>("pan");
   const [history, setHistory] = useState<ImageData[]>([]);
   const [matchedRoutes, setMatchedRoutes] = useState<MatchedRoute[]>([]);
+  const [activeRouteLabel, setActiveRouteLabel] = useState<string | null>(null);
   const [hoveredRouteLabel, setHoveredRouteLabel] = useState<string | null>(null);
   const [mapPaths, setMapPaths] = useState<string[]>([]);
   const [cursorCoords, setCursorCoords] = useState({ lat: 26.2006, lon: 92.9376 });
   const [annotationLengthKm, setAnnotationLengthKm] = useState(0);
-  const [outOfBoundsPoints, setOutOfBoundsPoints] = useState(0);
-  const [candidateCount, setCandidateCount] = useState(0);
 
   const lastPos = useRef<Point | null>(null);
   const strokesRef = useRef<Point[][]>([]);
@@ -189,13 +274,23 @@ export default function MapCanvas() {
     };
 
     loadMap().catch(() => {
-      // Keep UI silent
+      // keep silent by design
     });
 
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!matchedRoutes.length) {
+      setActiveRouteLabel(null);
+      return;
+    }
+    if (!activeRouteLabel || !matchedRoutes.some((r) => r.label === activeRouteLabel)) {
+      setActiveRouteLabel(matchedRoutes[0].label);
+    }
+  }, [matchedRoutes, activeRouteLabel]);
 
   const saveToHistory = useCallback(() => {
     const canvas = canvasRef.current;
@@ -205,23 +300,6 @@ export default function MapCanvas() {
       setHistory((prev) => [...prev, imageData]);
     }
   }, []);
-
-  const undo = useCallback(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (ctx && canvas && history.length > 0) {
-      const newHistory = [...history];
-      newHistory.pop();
-      setHistory(newHistory);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (newHistory.length > 0) {
-        ctx.putImageData(newHistory[newHistory.length - 1], 0, 0);
-      }
-
-      strokesRef.current.pop();
-    }
-  }, [history]);
 
   const getCanvasCoordinates = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     const canvas = canvasRef.current;
@@ -247,17 +325,6 @@ export default function MapCanvas() {
       x: (clientX - rect.left) * scaleX,
       y: (clientY - rect.top) * scaleY,
     };
-  }, []);
-
-  const updateCursorFromMouse = useCallback((e: React.MouseEvent) => {
-    const wrap = mapWrapRef.current;
-    if (!wrap) return;
-
-    const rect = wrap.getBoundingClientRect();
-    const x = clamp01((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-    const y = clamp01((e.clientY - rect.top) / rect.height) * MAP_HEIGHT;
-    const [lon, lat] = pixelToLonLat({ x, y }, MAP_WIDTH, MAP_HEIGHT);
-    setCursorCoords({ lat, lon });
   }, []);
 
   const startDrawing = useCallback(
@@ -313,19 +380,44 @@ export default function MapCanvas() {
     currentStrokeRef.current = null;
   }, []);
 
+  const undo = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!ctx || !canvas || history.length === 0) return;
+
+    const newHistory = [...history];
+    newHistory.pop();
+    setHistory(newHistory);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (newHistory.length > 0) {
+      ctx.putImageData(newHistory[newHistory.length - 1], 0, 0);
+    }
+
+    strokesRef.current.pop();
+  }, [history]);
+
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
-    if (ctx && canvas) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      setHistory([]);
-      strokesRef.current = [];
-      setMatchedRoutes([]);
-      setHoveredRouteLabel(null);
-      setAnnotationLengthKm(0);
-      setOutOfBoundsPoints(0);
-      setCandidateCount(0);
-    }
+    if (!ctx || !canvas) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setHistory([]);
+    strokesRef.current = [];
+    setMatchedRoutes([]);
+    setActiveRouteLabel(null);
+    setHoveredRouteLabel(null);
+    setAnnotationLengthKm(0);
+  }, []);
+
+  const updateCursorFromMouse = useCallback((e: React.MouseEvent) => {
+    const wrap = mapWrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const x = clamp01((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+    const y = clamp01((e.clientY - rect.top) / rect.height) * MAP_HEIGHT;
+    const [lon, lat] = pixelToLonLat({ x, y }, MAP_WIDTH, MAP_HEIGHT);
+    setCursorCoords({ lat, lon });
   }, []);
 
   const projectRouteLineToPixels = useCallback((routeLine: number[][], width: number, height: number) => {
@@ -343,13 +435,6 @@ export default function MapCanvas() {
 
     const coords = allPoints.map((point) => pixelToLonLat(point, canvas.width, canvas.height));
     const pixelLine = allPoints.map((point) => [clamp01(point.x / canvas.width), clamp01(point.y / canvas.height)]);
-
-    const outPoints = coords.filter(
-      ([lon, lat]) =>
-        lon < MAP_BOUNDS.minLon || lon > MAP_BOUNDS.maxLon || lat < MAP_BOUNDS.minLat || lat > MAP_BOUNDS.maxLat
-    ).length;
-
-    setOutOfBoundsPoints(outPoints);
     setAnnotationLengthKm(polylineKm(coords));
 
     const geojson = {
@@ -362,28 +447,21 @@ export default function MapCanvas() {
     };
 
     try {
-      const saveRes = await fetch("/api/annotation", {
+      const saveRes = await fetch(apiUrl("/api/annotation"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(geojson),
       });
       if (!saveRes.ok) return;
 
-      const matchRes = await fetch("/api/match-last", { method: "POST" });
+      const matchRes = await fetch(apiUrl("/api/match-last"), { method: "POST" });
       if (!matchRes.ok) return;
 
       const matchData = (await matchRes.json()) as MatchResponse;
       const bestMatches = matchData.result?.best ?? [];
-      setCandidateCount(matchData.result?.candidates ?? 0);
-
-      if (!bestMatches.length) {
-        setMatchedRoutes([]);
-        setHoveredRouteLabel(null);
-        return;
-      }
 
       const projectedRoutes: MatchedRoute[] = [];
-      for (let i = 0; i < bestMatches.length && i < ROUTE_COLORS.length; i += 1) {
+      for (let i = 0; i < bestMatches.length; i += 1) {
         const route = bestMatches[i];
         const routeLine = route.route_line;
         if (!routeLine || routeLine.length < 2) continue;
@@ -395,93 +473,133 @@ export default function MapCanvas() {
         const number = route.train_no?.trim();
         const label = name ? `${name}${number ? ` (${number})` : ""}` : number ? `Train ${number}` : `Match ${i + 1}`;
 
+        const style = getRouteStyle(i);
+
         projectedRoutes.push({
           label,
-          color: ROUTE_COLORS[i],
+          color: style.line,
+          glow: style.glow,
           points: projected,
           trainNo: route.train_no,
           trainName: route.train_name,
           distanceNorm: route.distance_px_norm,
           routeLengthKm: route.route_length_km,
           stationCount: route.station_count,
+          stations: route.stations,
         });
       }
 
       setMatchedRoutes(projectedRoutes);
       setHoveredRouteLabel(null);
     } catch {
-      // Keep UI silent
+      // keep silent by design
     }
   }, [projectRouteLineToPixels]);
 
   const displayedRoutes = useMemo(() => {
-    if (!hoveredRouteLabel) return matchedRoutes;
-    const active = matchedRoutes.find((route) => route.label === hoveredRouteLabel);
+    const emphasis = hoveredRouteLabel || activeRouteLabel;
+    if (!emphasis) return matchedRoutes;
+    const active = matchedRoutes.find((route) => route.label === emphasis);
     if (!active) return matchedRoutes;
-    return [...matchedRoutes.filter((route) => route.label !== hoveredRouteLabel), active];
-  }, [matchedRoutes, hoveredRouteLabel]);
+    return [...matchedRoutes.filter((route) => route.label !== emphasis), active];
+  }, [matchedRoutes, hoveredRouteLabel, activeRouteLabel]);
 
-  const topRoute = matchedRoutes[0];
-  const similarity = topRoute?.distanceNorm != null ? Math.max(0, Math.min(100, 100 - topRoute.distanceNorm * 180)) : 0;
+  const activeRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === activeRouteLabel) || matchedRoutes[0],
+    [matchedRoutes, activeRouteLabel]
+  );
+
+  const hoveredRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === hoveredRouteLabel) || null,
+    [matchedRoutes, hoveredRouteLabel]
+  );
+  const stopStations = (activeRoute?.stations || []).filter(isStoppingStation);
+  const estDurationHours = estimateDurationHours(activeRoute?.stations || []);
+  const trainType = inferTrainType(activeRoute?.trainName);
 
   return (
-    <div className="h-screen w-screen bg-slate-950 text-slate-300 font-sans flex flex-col overflow-hidden selection:bg-blue-500/30">
-      <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 z-20 shrink-0 shadow-sm">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
-            <Map size={18} />
+    <div className="h-screen w-screen bg-[#0B1120] text-slate-300 font-sans flex flex-col overflow-hidden">
+      <header className="h-14 bg-[#111827] border-b border-gray-800 flex items-center justify-between px-6 z-20 shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded bg-blue-600/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+            <Train size={18} />
           </div>
-          <h1 className="text-slate-100 font-semibold tracking-tight truncate">RailRoute Validator</h1>
-          <div className="h-4 w-px bg-slate-700 mx-2" />
-          <button className="flex items-center gap-2 text-xs font-medium text-slate-400 bg-slate-800/50 px-3 py-1.5 rounded-md border border-slate-700/50">
-            <Clock size={14} />
-            <span>v2.1.4 (Latest)</span>
-          </button>
+          <h1 className="text-gray-100 font-medium tracking-wide">RailRoute Explorer</h1>
         </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={undo}
-            className="flex items-center gap-2 text-sm font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 px-3 py-2 rounded-lg transition-all border border-slate-700"
-          >
-            <Undo2 size={16} />
-            Undo
+        <div className="flex items-center gap-4 text-gray-400">
+          <button className="hover:text-white transition-colors">
+            <Settings size={18} />
           </button>
-          <button
-            onClick={clearCanvas}
-            className="flex items-center gap-2 text-sm font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 px-3 py-2 rounded-lg transition-all border border-slate-700"
-          >
-            <RotateCcw size={16} />
-            Reset
-          </button>
-          <button
-            onClick={exportGeoJSON}
-            className="flex items-center gap-2 text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg transition-all shadow-lg shadow-blue-900/20"
-          >
-            <Download size={16} />
-            Export GeoJSON
+          <button className="hover:text-white transition-colors">
+            <User size={18} />
           </button>
         </div>
       </header>
 
-      <main className="flex-1 flex relative min-h-0">
-        <div
-          className="flex-1 relative bg-[#0a0f18]"
-          style={{
-            backgroundImage: "radial-gradient(circle at center, #1e293b 1px, transparent 1px)",
-            backgroundSize: "24px 24px",
-          }}
-        >
+      <main className="flex-1 flex overflow-hidden">
+        <aside className="w-[340px] bg-[#111827] border-r border-gray-800 flex flex-col z-10 shrink-0">
+          <div className="p-5 border-b border-gray-800">
+            <h2 className="text-sm font-semibold text-gray-100">Routes Gallery</h2>
+            <p className="text-xs text-gray-500 mt-1">BEST MATCHES ({matchedRoutes.length} Trains)</p>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {matchedRoutes.length === 0 ? (
+              <div className="text-xs text-gray-500 border border-dashed border-gray-700 rounded-xl p-4">
+                Draw on the map and click export to fetch best matches.
+              </div>
+            ) : (
+              matchedRoutes.map((route, idx) => {
+                const isActive = activeRoute?.label === route.label;
+                const isHovered = hoveredRouteLabel === route.label;
+                const borderColor = isActive ? route.color : isHovered ? "#4b5563" : "#1f2937";
+                const glow = isActive ? `0 0 18px ${route.glow}` : "none";
+
+                return (
+                  <button
+                    key={route.label}
+                    onClick={() => setActiveRouteLabel(route.label)}
+                    onMouseEnter={() => setHoveredRouteLabel(route.label)}
+                    onMouseLeave={() => setHoveredRouteLabel(null)}
+                    className="w-full text-left p-4 rounded-xl border transition-all duration-200 flex items-start gap-3 relative overflow-hidden bg-transparent"
+                    style={{
+                      borderColor,
+                      boxShadow: glow,
+                      backgroundColor: isActive ? "rgba(31,41,55,0.7)" : isHovered ? "rgba(31,41,55,0.45)" : "transparent",
+                    }}
+                  >
+                    <div className="w-3 h-3 rounded-full mt-1 shrink-0" style={{ backgroundColor: route.color }} />
+
+                    <div className="flex-1 min-w-0">
+                      <h3 className={`text-sm font-medium truncate ${isActive ? "text-white" : "text-gray-300"}`}>{route.trainName || route.label}</h3>
+                      <p className="text-xs text-gray-500 mt-1">Train No: ({route.trainNo || "-"})</p>
+                    </div>
+
+                    <div className="text-xs text-gray-600 font-mono">#{idx + 1}</div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        <section className="flex-1 relative bg-[#0a0f18] flex items-center justify-center overflow-hidden">
+          <div
+            className="absolute inset-0 opacity-20 pointer-events-none"
+            style={{ backgroundImage: "radial-gradient(#334155 1px, transparent 1px)", backgroundSize: "30px 30px" }}
+          />
+
+          <div className="absolute inset-0 flex items-center justify-center opacity-30 pointer-events-none">
+            <div className="w-[620px] h-[620px] border border-gray-700/50 rounded-full blur-[100px] bg-blue-900/20" />
+          </div>
+
           <TransformWrapper initialScale={1} minScale={0.55} maxScale={6} disabled={tool !== "pan"} centerOnInit>
             {({ zoomIn, zoomOut }) => (
               <>
-                <TransformComponent
-                  wrapperClass="!w-full !h-full overflow-auto"
-                  contentClass="!w-full !h-full flex items-start justify-center px-4 pt-4 pb-20"
-                >
+                <TransformComponent wrapperClass="!w-full !h-full overflow-auto" contentClass="!w-full !h-full flex items-center justify-center p-6">
                   <div
                     ref={mapWrapRef}
-                    className="relative w-[min(95vw,1040px)] max-w-full"
+                    className="relative w-[min(90vw,900px)] max-w-full"
                     style={{ aspectRatio: `${MAP_WIDTH} / ${MAP_HEIGHT}` }}
                     onMouseMove={updateCursorFromMouse}
                   >
@@ -491,27 +609,43 @@ export default function MapCanvas() {
                       viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
                       preserveAspectRatio="xMidYMin meet"
                       className="block h-full w-full"
-                      style={{ background: "#ffffff" }}
                     >
-                      <g fill="#ffffff" stroke="#6b7280" strokeWidth="1.15" strokeLinejoin="round">
+                      <g fill="none" stroke="#334155" strokeWidth="1.05" strokeLinejoin="round" opacity="0.9">
                         {mapPaths.map((d, idx) => (
                           <path key={`state-${idx}`} d={d} />
                         ))}
                       </g>
 
                       {displayedRoutes.map((route) => {
-                        const isActive = !hoveredRouteLabel || hoveredRouteLabel === route.label;
+                        const highlighted =
+                          (hoveredRouteLabel && hoveredRouteLabel === route.label) ||
+                          (!hoveredRouteLabel && activeRoute && activeRoute.label === route.label);
+                        const muted = hoveredRouteLabel && hoveredRouteLabel !== route.label;
+                        const strokeWidth = highlighted ? 5 : 3;
+                        const opacity = muted ? 0.16 : highlighted ? 1 : 0.65;
+
                         return (
-                          <polyline
-                            key={`route-${route.label}`}
-                            points={route.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                            fill="none"
-                            stroke={route.color}
-                            strokeWidth={isActive ? "6" : "3"}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            opacity={isActive ? 0.95 : 0.22}
-                          />
+                          <g key={`route-${route.label}`} style={{ opacity }}>
+                            {highlighted ? (
+                              <polyline
+                                points={route.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                                fill="none"
+                                stroke={route.color}
+                                strokeWidth={strokeWidth + 6}
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                opacity="0.25"
+                              />
+                            ) : null}
+                            <polyline
+                              points={route.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                              fill="none"
+                              stroke={route.color}
+                              strokeWidth={strokeWidth}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </g>
                         );
                       })}
                     </svg>
@@ -536,122 +670,120 @@ export default function MapCanvas() {
                   </div>
                 </TransformComponent>
 
-                <div className="absolute left-6 top-6 flex flex-col gap-2 bg-slate-900/85 backdrop-blur-md border border-slate-800 p-2 rounded-xl shadow-2xl z-10">
-                  <ToolButton icon={<MousePointer2 size={18} />} tooltip="Pan" active={tool === "pan"} onClick={() => setTool("pan")} />
-                  <ToolButton icon={<PenTool size={18} />} tooltip="Draw Route (LineString)" active={tool === "draw"} onClick={() => setTool("draw")} />
-                  <ToolButton icon={<Eraser size={18} />} tooltip="Eraser" active={tool === "eraser"} onClick={() => setTool("eraser")} />
-                  <div className="h-px w-full bg-slate-800 my-1" />
-                  <ToolButton icon={<Layers size={18} />} tooltip="Clear Highlights" onClick={() => setHoveredRouteLabel(null)} />
-                  <ToolButton icon={<ZoomIn size={18} />} tooltip="Zoom In" onClick={() => zoomIn()} />
-                  <ToolButton icon={<ZoomOut size={18} />} tooltip="Zoom Out" onClick={() => zoomOut()} />
-                  <ToolButton icon={<Upload size={18} />} tooltip="Export Annotation" onClick={exportGeoJSON} />
-                </div>
+                {hoveredRoute ? (
+                  <div className="absolute top-24 right-24 bg-[#1e293b]/95 backdrop-blur-md border border-gray-700 p-4 rounded-xl shadow-2xl max-w-xs z-30">
+                    <h4 className="text-sm font-semibold text-white mb-1">{hoveredRoute.trainName || hoveredRoute.label}</h4>
+                    <p className="text-xs text-gray-400 mb-2">Train No: {hoveredRoute.trainNo || "-"}</p>
+                    <div className="text-xs text-gray-500 leading-relaxed border-t border-gray-700 pt-2">
+                      Hover preview active. Click this route card in the left gallery to lock full details.
+                    </div>
+                  </div>
+                ) : null}
 
-                <div className="absolute bottom-6 left-6 flex items-center gap-2 bg-slate-900/80 backdrop-blur-md border border-slate-800 px-3 py-1.5 rounded-lg shadow-lg text-xs font-mono text-slate-400 z-10">
-                  <Crosshair size={14} className="text-blue-500" />
+                <div className="absolute top-6 left-6 flex items-center gap-2 bg-[#111827]/90 backdrop-blur border border-gray-800 px-3 py-1.5 rounded-lg shadow-lg text-xs font-mono text-slate-400 z-30">
+                  <Crosshair size={13} className="text-blue-500" />
                   <span>Lat: {cursorCoords.lat.toFixed(4)}°</span>
                   <span className="text-slate-600">|</span>
                   <span>Lon: {cursorCoords.lon.toFixed(4)}°</span>
                 </div>
+
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-[#111827]/90 backdrop-blur border border-gray-800 p-2 rounded-2xl flex items-center gap-2 shadow-2xl z-30">
+                  <IconButton icon={<ZoomIn size={18} />} tooltip="Zoom In" onClick={() => zoomIn()} />
+                  <IconButton icon={<ZoomOut size={18} />} tooltip="Zoom Out" onClick={() => zoomOut()} />
+                  <div className="w-px h-6 bg-gray-800 mx-1" />
+                  <IconButton icon={<Hand size={18} />} tooltip="Pan Map" active={tool === "pan"} onClick={() => setTool("pan")} />
+                  <IconButton icon={<PenLine size={18} />} tooltip="Draw Route" active={tool === "draw"} onClick={() => setTool("draw")} />
+                  <IconButton icon={<Eraser size={18} />} tooltip="Eraser" active={tool === "eraser"} onClick={() => setTool("eraser")} />
+                  <div className="w-px h-6 bg-gray-800 mx-1" />
+                  <IconButton icon={<Download size={18} />} tooltip="Export Annotation" onClick={exportGeoJSON} />
+                  <IconButton icon={<Layers size={18} />} tooltip="Clear" onClick={clearCanvas} />
+                  <button
+                    onClick={undo}
+                    className="text-[11px] text-gray-400 px-2.5 py-2 rounded-xl hover:bg-gray-800 hover:text-gray-200 transition"
+                    title="Undo"
+                  >
+                    Undo
+                  </button>
+                </div>
               </>
             )}
           </TransformWrapper>
-        </div>
+        </section>
 
-        <aside className="w-[380px] max-w-[40vw] bg-slate-900 border-l border-slate-800 flex flex-col h-full shadow-2xl z-20 shrink-0">
-          <div className="p-5 border-b border-slate-800">
-            <h2 className="text-sm font-semibold text-slate-100 uppercase tracking-wider mb-4">Validation Dashboard</h2>
-
-            <div
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium mb-6 ${
-                outOfBoundsPoints === 0
-                  ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
-                  : "bg-red-500/10 border border-red-500/25 text-red-400"
-              }`}
-            >
-              <CheckCircle size={16} />
-              {outOfBoundsPoints === 0 ? "Inside India Bounds" : "Contains Out-of-Bounds Points"}
-            </div>
-
-            <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-              <div className="text-sm text-slate-400 mb-1">Route Similarity Match</div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-5xl font-bold text-slate-100 tracking-tight">{similarity.toFixed(1)}</span>
-                <span className="text-xl text-slate-500">%</span>
-              </div>
-              <div className="mt-3 w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
-                <div className="bg-blue-500 h-full rounded-full" style={{ width: `${similarity}%` }} />
-              </div>
+        <aside className="w-[320px] bg-[#111827] border-l border-gray-800 flex flex-col z-10 shrink-0 shadow-2xl">
+          <div className="p-5 border-b border-gray-800 flex items-center justify-between">
+            <div className="flex gap-4 w-full">
+              <button className="text-sm font-semibold text-gray-100 border-b-2 border-blue-500 pb-4 -mb-5 flex-1 text-left">
+                Route Insights
+              </button>
+              <button className="text-sm font-medium text-gray-500 pb-4 -mb-5 flex-1 text-right">Route Details</button>
             </div>
           </div>
 
-          <div className="p-5 flex-1 overflow-y-auto space-y-6">
-            <div>
-              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Top Route Matches</h3>
-              <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                {matchedRoutes.length === 0 ? (
-                  <div className="text-xs text-slate-500">No routes yet. Draw and export to match.</div>
-                ) : (
-                  matchedRoutes.map((route, idx) => {
-                    const isActive = !hoveredRouteLabel || hoveredRouteLabel === route.label;
-                    return (
-                      <button
-                        key={`legend-${route.label}`}
-                        type="button"
-                        className={`w-full text-left p-3 rounded-lg border transition ${
-                          isActive
-                            ? "bg-slate-800/60 border-slate-700 text-slate-100"
-                            : "bg-slate-900/50 border-slate-800 text-slate-400"
-                        }`}
-                        onMouseEnter={() => setHoveredRouteLabel(route.label)}
-                        onMouseLeave={() => setHoveredRouteLabel(null)}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: route.color }} />
-                          <span className="text-sm font-medium truncate">{route.label}</span>
-                          <span className="ml-auto text-xs text-slate-500">#{idx + 1}</span>
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </div>
+          <div className="p-5 overflow-y-auto flex-1 text-sm">
+            <div className="uppercase text-[10px] tracking-widest text-gray-500 mb-3 font-semibold">Route Analytics - Selected</div>
+            <h3 className="text-gray-200 font-medium leading-snug mb-6">
+              {activeRoute?.trainName || "No route selected"}
+              <span className="block text-gray-500 text-xs mt-1">({activeRoute?.trainNo || "-"})</span>
+            </h3>
 
-            <div>
-              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Geographic Bounds</h3>
-              <div className="grid grid-cols-2 gap-3">
-                <DataCard label="Min Longitude" value={`${MAP_BOUNDS.minLon.toFixed(2)}°`} valid />
-                <DataCard label="Max Longitude" value={`${MAP_BOUNDS.maxLon.toFixed(2)}°`} valid />
-                <DataCard label="Min Latitude" value={`${MAP_BOUNDS.minLat.toFixed(2)}°`} valid />
-                <DataCard label="Max Latitude" value={`${MAP_BOUNDS.maxLat.toFixed(2)}°`} valid />
-              </div>
-            </div>
+            {activeRoute ? (
+              <>
+                <div className="mb-6 rounded-xl border border-gray-700/60 overflow-hidden bg-[#1f2937]/40">
+                  <div className="grid grid-cols-2">
+                    <div className="p-3 border-r border-b border-gray-700/60">
+                      <div className="text-xs text-gray-500 mb-1">Distance</div>
+                      <div className="text-2xl font-semibold text-gray-200">
+                        {activeRoute.routeLengthKm ? `${activeRoute.routeLengthKm.toFixed(0)} km` : "N/A"}
+                      </div>
+                    </div>
+                    <div className="p-3 border-b border-gray-700/60">
+                      <div className="text-xs text-gray-500 mb-1">Est. Duration</div>
+                      <div className="text-2xl font-semibold text-gray-200">{estDurationHours ? `${estDurationHours} hrs` : "N/A"}</div>
+                    </div>
+                  </div>
+                  <div className="p-3 border-b border-gray-700/60">
+                    <div className="text-xs text-gray-500 mb-1">Number of Major Stops</div>
+                    <div className="text-2xl font-semibold text-gray-200">{stopStations.length}</div>
+                  </div>
+                  <div className="grid grid-cols-2">
+                    <div className="p-3 border-r border-gray-700/60">
+                      <div className="text-xs text-gray-500 mb-1">Train Type</div>
+                      <div className="text-lg font-semibold text-gray-200">{trainType}</div>
+                    </div>
+                    <div className="p-3">
+                      <div className="text-xs text-gray-500 mb-1">Number of Coaches</div>
+                      <div className="text-lg font-semibold text-gray-200">N/A</div>
+                    </div>
+                  </div>
+                </div>
 
-            <div>
-              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Route Analytics</h3>
-              <div className="space-y-2">
-                <StatRow label="Calculated Length" value={annotationLengthKm ? `${annotationLengthKm.toFixed(0)} km` : "-"} />
-                <StatRow
-                  label="Reference Length"
-                  value={topRoute?.routeLengthKm ? `${topRoute.routeLengthKm.toFixed(0)} km` : "-"}
-                />
-                <StatRow
-                  label="Matched Stations"
-                  value={topRoute?.stationCount ? `${topRoute.stationCount}` : "-"}
-                  highlight
-                />
-                <StatRow label="Candidate Routes" value={String(candidateCount)} />
-                <StatRow label="Out of Bounds Points" value={String(outOfBoundsPoints)} isError={outOfBoundsPoints > 0} />
-              </div>
-            </div>
+                <div>
+                  <div className="text-xs font-semibold text-gray-400 mb-4 flex items-center gap-2">
+                    <Navigation size={14} className="text-blue-500" />
+                    Stopping Stations
+                  </div>
 
-            <div className="mt-4 p-4 bg-slate-800/30 rounded-lg border border-slate-800 flex items-start gap-3">
-              <AlertTriangle size={18} className="text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Hover a train route in the legend above to highlight it directly on the map and compare trajectory.
-              </p>
-            </div>
+                  <div className="space-y-4 relative before:absolute before:inset-0 before:ml-[5px] before:h-full before:w-px before:bg-gray-800">
+                    {stopStations.map((station, idx) => (
+                      <div key={`${station.code || station.name || "st"}-${idx}`} className="relative flex flex-col pl-6">
+                        <div className="absolute left-0 top-1 w-3 h-3 bg-gray-700 rounded-full border-2 border-[#111827]" />
+                        <span className="text-gray-300 font-medium text-xs">
+                          {idx + 1}. {station.name || station.code || "Unknown"}
+                        </span>
+                        <span className="text-[11px] text-gray-500 mt-0.5">{formatStationTime(station)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="h-40 flex items-center justify-center border border-dashed border-gray-800 rounded-xl">
+                <div className="text-gray-500 text-center px-4 text-xs leading-relaxed">
+                  Draw and export an annotation to load matched routes and insights.
+                </div>
+              </div>
+            )}
           </div>
         </aside>
       </main>
@@ -659,10 +791,10 @@ export default function MapCanvas() {
   );
 }
 
-function ToolButton({
+function IconButton({
   icon,
   tooltip,
-  active = false,
+  active,
   onClick,
 }: {
   icon: React.ReactNode;
@@ -674,39 +806,11 @@ function ToolButton({
     <button
       title={tooltip}
       onClick={onClick}
-      className={`p-2.5 rounded-lg transition-all duration-200 group ${
-        active ? "bg-blue-600 text-white shadow-md shadow-blue-900/20" : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+      className={`p-2.5 rounded-xl transition-all duration-200 ${
+        active ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
       }`}
     >
       {icon}
     </button>
-  );
-}
-
-function DataCard({ label, value, valid }: { label: string; value: string; valid?: boolean }) {
-  return (
-    <div className={`p-3 rounded-lg border ${valid ? "bg-slate-800/50 border-slate-700/50" : "bg-red-500/10 border-red-500/30"}`}>
-      <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1">{label}</div>
-      <div className={`font-mono text-sm ${valid ? "text-slate-200" : "text-red-400"}`}>{value}</div>
-    </div>
-  );
-}
-
-function StatRow({
-  label,
-  value,
-  highlight,
-  isError,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-  isError?: boolean;
-}) {
-  return (
-    <div className="flex justify-between items-center py-2 border-b border-slate-800/50 last:border-0">
-      <span className="text-sm text-slate-400">{label}</span>
-      <span className={`text-sm font-medium ${highlight ? "text-blue-400" : isError ? "text-red-400" : "text-slate-200"}`}>{value}</span>
-    </div>
   );
 }

@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: railways-matcher-api
+    env: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm run server
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: DATA_ROOT
+        value: /opt/render/project/src/runtime_data
+      - key: ROUTES_FILE
+        value: /opt/render/project/src/runtime_data/datameet_routes.jsonl
+      - key: FRONTEND_ORIGIN
+        sync: false
