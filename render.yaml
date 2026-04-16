@@ -4,7 +4,7 @@ services:
     env: node
     plan: free
     buildCommand: npm ci
-    startCommand: npm run server
+    startCommand: npm run server:render
     envVars:
       - key: NODE_VERSION
         value: 22
@@ -13,4 +13,6 @@ services:
       - key: ROUTES_FILE
         value: /opt/render/project/src/runtime_data/datameet_routes.jsonl
       - key: FRONTEND_ORIGIN
+        sync: false
+      - key: DATASET_URL
         sync: false
