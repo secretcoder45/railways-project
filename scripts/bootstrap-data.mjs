@@ -1,87 +1,58 @@
 import fs from "fs/promises";
-import { createReadStream, createWriteStream } from "fs";
+import { createWriteStream } from "fs";
 import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
-import zlib from "zlib";
 
-const dataRoot = process.env.DATA_ROOT || path.join(process.cwd(), "data");
-const routesFile = process.env.ROUTES_FILE || path.join(dataRoot, "processed", "datameet_routes.jsonl");
-const datasetUrl = process.env.DATASET_URL;
-const localSeedGzip = path.join(process.cwd(), "runtime_seed", "datameet_routes.jsonl.gz");
-const localSeedJsonl = path.join(process.cwd(), "runtime_seed", "datameet_routes.jsonl");
+const dataRoot = process.env.DATA_ROOT || path.join(process.cwd(), "runtime_data");
 
-async function existsWithData(filePath) {
+const rawTrainsFile = process.env.RAW_TRAINS_FILE || path.join(dataRoot, "trains.json");
+const rawStationsFile = process.env.RAW_STATIONS_FILE || path.join(dataRoot, "stations.json");
+const rawSchedulesFile = process.env.RAW_SCHEDULES_FILE || path.join(dataRoot, "schedules.json");
+
+const rawTrainsUrl = process.env.RAW_TRAINS_URL || "https://raw.githubusercontent.com/datameet/railways/master/trains.json";
+const rawStationsUrl = process.env.RAW_STATIONS_URL || "https://raw.githubusercontent.com/datameet/railways/master/stations.json";
+const rawSchedulesUrl = process.env.RAW_SCHEDULES_URL || "https://raw.githubusercontent.com/datameet/railways/master/schedules.json";
+
+async function existsWithData(filePath, minBytes = 1024) {
   try {
     const st = await fs.stat(filePath);
-    return st.isFile() && st.size > 1024;
+    return st.isFile() && st.size > minBytes;
   } catch {
     return false;
   }
 }
 
-async function inflateGzipFile(gzipPath, outFile) {
-  await pipeline(createReadStream(gzipPath), zlib.createGunzip(), createWriteStream(outFile));
-}
-
-async function copyFile(src, outFile) {
-  await pipeline(createReadStream(src), createWriteStream(outFile));
-}
-
 async function downloadToFile(url, targetFile) {
   const res = await fetch(url);
   if (!res.ok || !res.body) {
-    throw new Error(`Failed to download dataset (${res.status} ${res.statusText})`);
+    throw new Error(`Failed to download ${url} (${res.status} ${res.statusText})`);
   }
 
   const bodyStream = Readable.fromWeb(res.body);
-  const out = createWriteStream(targetFile);
+  await pipeline(bodyStream, createWriteStream(targetFile));
+}
 
-  if (url.toLowerCase().endsWith(".gz")) {
-    await pipeline(bodyStream, zlib.createGunzip(), out);
-  } else {
-    await pipeline(bodyStream, out);
+async function ensureFile(filePath, url, label) {
+  const minSize = label === "schedules" ? 10 * 1024 * 1024 : 100 * 1024;
+  if (await existsWithData(filePath, minSize)) {
+    console.log(`[bootstrap] ${label} already present: ${filePath}`);
+    return;
   }
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.download`;
+
+  console.log(`[bootstrap] downloading ${label} from ${url}`);
+  await downloadToFile(url, tmp);
+  await fs.rename(tmp, filePath);
+  console.log(`[bootstrap] ${label} ready: ${filePath}`);
 }
 
 async function main() {
-  if (await existsWithData(routesFile)) {
-    console.log(`[bootstrap] dataset already present: ${routesFile}`);
-    return;
-  }
-
-  await fs.mkdir(path.dirname(routesFile), { recursive: true });
-  const tmp = `${routesFile}.download`;
-
-  // 1) Use committed local seed first (most reliable on Render).
-  if (await existsWithData(localSeedGzip)) {
-    console.log(`[bootstrap] using local seed gzip: ${localSeedGzip}`);
-    await inflateGzipFile(localSeedGzip, tmp);
-    await fs.rename(tmp, routesFile);
-    console.log(`[bootstrap] dataset ready: ${routesFile}`);
-    return;
-  }
-
-  if (await existsWithData(localSeedJsonl)) {
-    console.log(`[bootstrap] using local seed jsonl: ${localSeedJsonl}`);
-    await copyFile(localSeedJsonl, tmp);
-    await fs.rename(tmp, routesFile);
-    console.log(`[bootstrap] dataset ready: ${routesFile}`);
-    return;
-  }
-
-  // 2) Fallback to URL download.
-  if (datasetUrl) {
-    console.log(`[bootstrap] downloading dataset from ${datasetUrl}`);
-    await downloadToFile(datasetUrl, tmp);
-    await fs.rename(tmp, routesFile);
-    console.log(`[bootstrap] dataset ready: ${routesFile}`);
-    return;
-  }
-
-  throw new Error(
-    `Dataset not found. Provide runtime_seed/datameet_routes.jsonl(.gz) or set DATASET_URL.`
-  );
+  await ensureFile(rawTrainsFile, rawTrainsUrl, "trains");
+  await ensureFile(rawStationsFile, rawStationsUrl, "stations");
+  await ensureFile(rawSchedulesFile, rawSchedulesUrl, "schedules");
 }
 
 main().catch((err) => {

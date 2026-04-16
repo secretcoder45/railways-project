@@ -10,9 +10,17 @@ services:
         value: 22
       - key: DATA_ROOT
         value: /opt/render/project/src/runtime_data
-      - key: ROUTES_FILE
-        value: /opt/render/project/src/runtime_data/datameet_routes.jsonl
+      - key: RAW_TRAINS_FILE
+        value: /opt/render/project/src/runtime_data/trains.json
+      - key: RAW_STATIONS_FILE
+        value: /opt/render/project/src/runtime_data/stations.json
+      - key: RAW_SCHEDULES_FILE
+        value: /opt/render/project/src/runtime_data/schedules.json
+      - key: RAW_TRAINS_URL
+        value: https://raw.githubusercontent.com/datameet/railways/master/trains.json
+      - key: RAW_STATIONS_URL
+        value: https://raw.githubusercontent.com/datameet/railways/master/stations.json
+      - key: RAW_SCHEDULES_URL
+        value: https://raw.githubusercontent.com/datameet/railways/master/schedules.json
       - key: FRONTEND_ORIGIN
-        sync: false
-      - key: DATASET_URL
         sync: false

@@ -11,16 +11,21 @@
 4. Add env vars:
    - `PORT=5050`
    - `DATA_ROOT=/opt/render/project/src/runtime_data`
-   - `ROUTES_FILE=/opt/render/project/src/runtime_data/datameet_routes.jsonl`
+   - `RAW_TRAINS_FILE=/opt/render/project/src/runtime_data/trains.json`
+   - `RAW_STATIONS_FILE=/opt/render/project/src/runtime_data/stations.json`
+   - `RAW_SCHEDULES_FILE=/opt/render/project/src/runtime_data/schedules.json`
+   - `RAW_TRAINS_URL=https://raw.githubusercontent.com/datameet/railways/master/trains.json`
+   - `RAW_STATIONS_URL=https://raw.githubusercontent.com/datameet/railways/master/stations.json`
+   - `RAW_SCHEDULES_URL=https://raw.githubusercontent.com/datameet/railways/master/schedules.json`
    - `FRONTEND_ORIGIN=https://<your-vercel-domain>`
-   - `DATASET_URL=https://<public-file-host>/datameet_routes.jsonl.gz`
 
 ### Dataset requirement
-The matcher needs `datameet_routes.jsonl` available at `ROUTES_FILE`.
-- Size is large, so keep it out of git.
-- Host the file publicly (S3/R2/GitHub Release) and set `DATASET_URL`.
-- On each boot, backend auto-downloads file into `ROUTES_FILE` (supports `.jsonl` and `.jsonl.gz`).
-- If file is missing or URL is invalid, startup fails with a clear error.
+The matcher now uses the normal/raw Datameet database files:
+- `trains.json`
+- `stations.json`
+- `schedules.json`
+
+On startup, backend auto-downloads these raw files using `RAW_*_URL` into `DATA_ROOT`.
 
 ### Health check
 - `GET /api/health`
