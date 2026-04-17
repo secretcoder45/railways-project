@@ -16,6 +16,8 @@ services:
         value: /opt/render/project/src/runtime_data/stations.json
       - key: RAW_SCHEDULES_FILE
         value: /opt/render/project/src/runtime_data/schedules.json
+      - key: PREBUILT_ROUTES_FILE
+        value: /opt/render/project/src/runtime_data/prebuilt_routes.json
       - key: RAW_TRAINS_URL
         value: https://raw.githubusercontent.com/datameet/railways/master/trains.json
       - key: RAW_STATIONS_URL

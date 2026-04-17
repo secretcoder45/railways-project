@@ -822,9 +822,8 @@ function IconButton({
     <button
       title={tooltip}
       onClick={onClick}
-      className={`p-2.5 rounded-xl transition-all duration-200 ${
-        active ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-      }`}
+      className={`p-2.5 rounded-xl transition-all duration-200 ${active ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+        }`}
     >
       {icon}
     </button>

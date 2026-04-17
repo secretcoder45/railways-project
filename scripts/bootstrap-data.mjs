@@ -3,6 +3,7 @@ import { createWriteStream } from "fs";
 import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
+import { buildPrebuiltRoutes } from "./build-routes.mjs";
 
 const dataRoot = process.env.DATA_ROOT || path.join(process.cwd(), "runtime_data");
 
@@ -53,6 +54,9 @@ async function main() {
   await ensureFile(rawTrainsFile, rawTrainsUrl, "trains");
   await ensureFile(rawStationsFile, rawStationsUrl, "stations");
   await ensureFile(rawSchedulesFile, rawSchedulesUrl, "schedules");
+
+  // Pre-build compact routes index from the raw data
+  await buildPrebuiltRoutes();
 }
 
 main().catch((err) => {

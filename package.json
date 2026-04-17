@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "server": "node server/index.js",
-    "server:render": "node scripts/bootstrap-data.mjs && node server/index.js"
+    "build-routes": "node scripts/build-routes.mjs",
+    "server:render": "node --max-old-space-size=450 scripts/bootstrap-data.mjs && node server/index.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

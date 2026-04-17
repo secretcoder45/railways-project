@@ -243,12 +243,31 @@ async function readJsonOrThrow(filePath, label) {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch {
-    throw new Error(`Unable to load ${label} at ${filePath}. Ensure normal/raw database files exist.`);
+    throw new Error(`Unable to load ${label} at ${filePath}. Ensure database files exist.`);
   }
 }
 
+const PREBUILT_ROUTES_FILE = process.env.PREBUILT_ROUTES_FILE || path.join(DATA_ROOT, "prebuilt_routes.json");
+
 async function loadRoutes() {
   if (routesCache) return routesCache;
+
+  // ── Fast path: load pre-built routes file (produced by bootstrap) ──
+  try {
+    const stat = await fs.stat(PREBUILT_ROUTES_FILE);
+    if (stat.isFile() && stat.size > 1024) {
+      console.log(`[matcher] loading prebuilt routes from ${PREBUILT_ROUTES_FILE} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+      const raw = JSON.parse(await fs.readFile(PREBUILT_ROUTES_FILE, "utf8"));
+      routesCache = raw;
+      console.log(`[matcher] ${routesCache.length} routes loaded from prebuilt cache`);
+      return routesCache;
+    }
+  } catch {
+    // prebuilt file not available — fall through to raw file loading
+  }
+
+  // ── Fallback: build from raw files (local dev without pre-build) ──
+  console.log("[matcher] prebuilt_routes.json not found, loading from raw data files...");
 
   const [trainsGeo, stationsGeo, schedules] = await Promise.all([
     readJsonOrThrow(RAW_TRAINS_FILE, "trains"),
@@ -335,6 +354,7 @@ async function loadRoutes() {
   }
 
   routesCache = built;
+  console.log(`[matcher] ${routesCache.length} routes built from raw data`);
   return routesCache;
 }
 

@@ -17,15 +17,19 @@
    - `RAW_TRAINS_URL=https://raw.githubusercontent.com/datameet/railways/master/trains.json`
    - `RAW_STATIONS_URL=https://raw.githubusercontent.com/datameet/railways/master/stations.json`
    - `RAW_SCHEDULES_URL=https://raw.githubusercontent.com/datameet/railways/master/schedules.json`
+   - `PREBUILT_ROUTES_FILE=/opt/render/project/src/runtime_data/prebuilt_routes.json`
    - `FRONTEND_ORIGIN=https://<your-vercel-domain>`
 
 ### Dataset requirement
-The matcher now uses the normal/raw Datameet database files:
+The matcher uses the normal/raw Datameet database files:
 - `trains.json`
 - `stations.json`
 - `schedules.json`
 
-On startup, backend auto-downloads these raw files using `RAW_*_URL` into `DATA_ROOT`.
+On startup, the backend (`scripts/bootstrap-data.mjs`):
+1. Auto-downloads these raw files using `RAW_*_URL` into `DATA_ROOT`.
+2. Runs a memory-efficient streaming parser to compile the raw files into a compact `prebuilt_routes.json`.
+3. The Express server then loads *only* the compact prebuilt file to stay well within the Render free tier's 512 MB memory limit.
 
 ### Health check
 - `GET /api/health`
