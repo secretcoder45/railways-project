@@ -430,20 +430,36 @@ export default function MapCanvas() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const allPoints = strokesRef.current.flat();
-    if (allPoints.length < 2) return;
+    const validStrokes = strokesRef.current.filter((stroke) => stroke.length >= 2);
+    if (!validStrokes.length) return;
 
-    const coords = allPoints.map((point) => pixelToLonLat(point, canvas.width, canvas.height));
-    const pixelLine = allPoints.map((point) => [clamp01(point.x / canvas.width), clamp01(point.y / canvas.height)]);
-    setAnnotationLengthKm(polylineKm(coords));
+    const strokeCoords = validStrokes.map((stroke) =>
+      stroke.map((point) => pixelToLonLat(point, canvas.width, canvas.height))
+    );
+    const strokePixelLines = validStrokes.map((stroke) =>
+      stroke.map((point) => [clamp01(point.x / canvas.width), clamp01(point.y / canvas.height)])
+    );
+
+    const totalLengthKm = strokeCoords.reduce((sum, line) => sum + polylineKm(line), 0);
+    setAnnotationLengthKm(totalLengthKm);
 
     const geojson = {
-      type: "Feature",
-      properties: { pixel_line: pixelLine },
-      geometry: {
-        type: "LineString",
-        coordinates: coords,
+      type: "FeatureCollection",
+      properties: {
+        pixel_strokes: strokePixelLines,
+        stroke_count: strokePixelLines.length,
       },
+      features: strokeCoords.map((line, idx) => ({
+        type: "Feature",
+        properties: {
+          stroke_index: idx,
+          pixel_line: strokePixelLines[idx],
+        },
+        geometry: {
+          type: "LineString",
+          coordinates: line,
+        },
+      })),
     };
 
     try {

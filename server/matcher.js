@@ -18,6 +18,8 @@ const RESAMPLE_POINTS = 200;
 const LENGTH_RATIO_MIN = 0.3;
 const LENGTH_RATIO_MAX = 3.5;
 const BBOX_PAD = 0.05;
+const STROKE_MAX_PENALTY_WEIGHT = 0.15;
+
 const MAX_RETURNED_ROUTES = 20;
 const SIMILARITY_MULTIPLIER = 1.22;
 const SIMILARITY_ABS_PAD = 0.025;
@@ -38,6 +40,11 @@ function lonLatToNorm(coord) {
   const x = (lon - MAP_BOUNDS.minLon) / (MAP_BOUNDS.maxLon - MAP_BOUNDS.minLon);
   const y = (MAP_BOUNDS.maxLat - lat) / (MAP_BOUNDS.maxLat - MAP_BOUNDS.minLat);
   return [clamp01(x), clamp01(y)];
+}
+
+function pixelNormPoint(coord) {
+  const [x, y] = coord;
+  return [clamp01(Number(x)), clamp01(Number(y))];
 }
 
 function euclidean(a, b) {
@@ -130,22 +137,70 @@ function discreteFrechet(p, q) {
   return c(n - 1, m - 1);
 }
 
+function toPixelLine(line) {
+  if (!Array.isArray(line)) return null;
+  const out = line
+    .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+    .map(pixelNormPoint)
+    .filter((pt) => Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+  return out.length >= 2 ? out : null;
+}
+
+function toLonLatLine(line) {
+  if (!Array.isArray(line)) return null;
+  const out = line
+    .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+    .map(lonLatToNorm)
+    .filter((pt) => Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+  return out.length >= 2 ? out : null;
+}
+
+function parseFeatureToStrokes(feature) {
+  const strokes = [];
+  if (!feature) return strokes;
+
+  if (Array.isArray(feature?.properties?.pixel_strokes)) {
+    for (const s of feature.properties.pixel_strokes) {
+      const line = toPixelLine(s);
+      if (line) strokes.push(line);
+    }
+  }
+
+  if (Array.isArray(feature?.properties?.pixel_line)) {
+    const line = toPixelLine(feature.properties.pixel_line);
+    if (line) strokes.push(line);
+  }
+
+  const geom = feature?.geometry;
+  if (geom?.type === "LineString") {
+    const line = toLonLatLine(geom.coordinates || []);
+    if (line) strokes.push(line);
+  }
+
+  if (geom?.type === "MultiLineString") {
+    for (const l of geom.coordinates || []) {
+      const line = toLonLatLine(l);
+      if (line) strokes.push(line);
+    }
+  }
+
+  return strokes;
+}
+
 function parseAnnotation(annotationGeoJson) {
-  if (annotationGeoJson?.properties?.pixel_line && Array.isArray(annotationGeoJson.properties.pixel_line)) {
-    return annotationGeoJson.properties.pixel_line;
+  if (!annotationGeoJson) return [];
+
+  if (annotationGeoJson.type === "FeatureCollection") {
+    const out = [];
+    for (const f of annotationGeoJson.features || []) out.push(...parseFeatureToStrokes(f));
+    return out;
   }
 
-  if (annotationGeoJson?.type === "Feature" && annotationGeoJson?.geometry?.type === "LineString") {
-    return (annotationGeoJson.geometry.coordinates || []).map(lonLatToNorm);
+  if (annotationGeoJson.type === "Feature") {
+    return parseFeatureToStrokes(annotationGeoJson);
   }
 
-  if (annotationGeoJson?.type === "FeatureCollection") {
-    const f = (annotationGeoJson.features || []).find((x) => x?.geometry?.type === "LineString");
-    if (f?.properties?.pixel_line && Array.isArray(f.properties.pixel_line)) return f.properties.pixel_line;
-    if (f?.geometry?.coordinates) return f.geometry.coordinates.map(lonLatToNorm);
-  }
-
-  return null;
+  return [];
 }
 
 function parseTimeMin(value) {
@@ -284,12 +339,20 @@ async function loadRoutes() {
 }
 
 export async function runMatch(annotationGeoJson) {
-  const ann = parseAnnotation(annotationGeoJson);
-  if (!ann || ann.length < 2) throw new Error("Annotation must be a GeoJSON LineString");
+  const annStrokesRaw = parseAnnotation(annotationGeoJson);
+  if (!annStrokesRaw.length) throw new Error("Annotation must contain at least one valid stroke");
 
-  const annotationResampled = resampleLine(ann, RESAMPLE_POINTS);
-  const annLen = lineLength(annotationResampled);
-  const b = bbox(annotationResampled);
+  const annStrokes = annStrokesRaw
+    .map((s) => resampleLine(s, RESAMPLE_POINTS))
+    .filter((s) => s.length >= 2);
+  if (!annStrokes.length) throw new Error("Annotation must contain at least one valid stroke");
+
+  const strokeLengths = annStrokes.map((s) => lineLength(s));
+  const annLen = strokeLengths.reduce((a, b) => a + b, 0);
+  if (annLen <= 0) throw new Error("Annotation must contain non-zero path length");
+
+  const mergedPoints = annStrokes.flat();
+  const b = bbox(mergedPoints);
   const annBox = [b[0] - BBOX_PAD, b[1] - BBOX_PAD, b[2] + BBOX_PAD, b[3] + BBOX_PAD];
 
   const routes = await loadRoutes();
@@ -300,12 +363,23 @@ export async function runMatch(annotationGeoJson) {
     if (route.length_norm > annLen * LENGTH_RATIO_MAX) continue;
     if (!bboxIntersects(route.bbox_norm, annBox)) continue;
 
-    const d = discreteFrechet(annotationResampled, route.sampled_norm_200);
+    let weighted = 0;
+    let maxStrokeDistance = 0;
+
+    for (let i = 0; i < annStrokes.length; i += 1) {
+      const d = discreteFrechet(annStrokes[i], route.sampled_norm_200);
+      weighted += d * strokeLengths[i];
+      if (d > maxStrokeDistance) maxStrokeDistance = d;
+    }
+
+    const avgDistance = weighted / annLen;
+    const score = avgDistance + maxStrokeDistance * STROKE_MAX_PENALTY_WEIGHT;
+
     candidates.push({
       train_no: route.train_no,
       train_name: route.train_name,
       train_type: route.train_type,
-      distance_px_norm: d,
+      distance_px_norm: score,
       route_length_km: route.route_length_km,
       station_count: route.station_count,
       route_line: route.route_line,
@@ -338,6 +412,7 @@ export async function runMatch(annotationGeoJson) {
 
   return {
     annotation_length_norm: annLen,
+    annotation_stroke_count: annStrokes.length,
     candidates: candidates.length,
     best_count: best.length,
     best,

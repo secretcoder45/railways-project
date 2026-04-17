@@ -32,7 +32,9 @@ app.get("/api/health", (_req, res) => {
 app.post("/api/annotation", async (req, res) => {
   try {
     const payload = req.body;
-    if (!payload || payload.type !== "Feature" || !payload.geometry) {
+    const isFeature = payload?.type === "Feature" && payload?.geometry;
+    const isFeatureCollection = payload?.type === "FeatureCollection" && Array.isArray(payload?.features);
+    if (!payload || (!isFeature && !isFeatureCollection)) {
       return res.status(400).json({ error: "Invalid GeoJSON" });
     }
 
