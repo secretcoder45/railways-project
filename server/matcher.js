@@ -247,7 +247,7 @@ async function readJsonOrThrow(filePath, label) {
   }
 }
 
-const PREBUILT_ROUTES_FILE = process.env.PREBUILT_ROUTES_FILE || path.join(DATA_ROOT, "prebuilt_routes.json");
+const PREBUILT_ROUTES_FILE = process.env.PREBUILT_ROUTES_FILE || path.join(process.cwd(), "server", "data", "prebuilt_routes.json.gz");
 
 async function loadRoutes() {
   if (routesCache) return routesCache;
@@ -257,12 +257,22 @@ async function loadRoutes() {
     const stat = await fs.stat(PREBUILT_ROUTES_FILE);
     if (stat.isFile() && stat.size > 1024) {
       console.log(`[matcher] loading prebuilt routes from ${PREBUILT_ROUTES_FILE} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
-      const raw = JSON.parse(await fs.readFile(PREBUILT_ROUTES_FILE, "utf8"));
-      routesCache = raw;
+      
+      let raw;
+      if (PREBUILT_ROUTES_FILE.endsWith(".gz")) {
+        const zlib = await import("zlib");
+        const compressed = await fs.readFile(PREBUILT_ROUTES_FILE);
+        raw = zlib.gunzipSync(compressed).toString("utf8");
+      } else {
+        raw = await fs.readFile(PREBUILT_ROUTES_FILE, "utf8");
+      }
+      
+      routesCache = JSON.parse(raw);
       console.log(`[matcher] ${routesCache.length} routes loaded from prebuilt cache`);
       return routesCache;
     }
-  } catch {
+  } catch (err) {
+    console.error(`[matcher] prebuilt file missing or invalid: ${err.message}`);
     // prebuilt file not available — fall through to raw file loading
   }
 

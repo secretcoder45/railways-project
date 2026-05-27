@@ -3,7 +3,7 @@ services:
     name: railways-matcher-api
     env: node
     plan: free
-    buildCommand: npm ci && node --max-old-space-size=2048 scripts/bootstrap-data.mjs
+    buildCommand: npm ci
     startCommand: node server/index.js
     envVars:
       - key: NODE_VERSION
