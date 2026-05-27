@@ -13,7 +13,11 @@ import {
   Download,
   Layers,
   Crosshair,
+  ShieldCheck,
+  Search,
 } from "lucide-react";
+import NearbyPopup from "./NearbyPopup";
+import AlignmentBadge from "./AlignmentBadge";
 
 type Tool = "pan" | "draw" | "eraser";
 type Point = { x: number; y: number };
@@ -44,6 +48,41 @@ type MatchResponse = {
     candidates?: number;
     best?: MatchRoute[];
   };
+};
+
+type NearbySegment = {
+  route_id: string;
+  train_name: string;
+  train_type: string | null;
+  station_count: number;
+  route_length_km: number;
+  nearest_distance_km: number;
+};
+
+type AlignmentResultData = {
+  status: "COMPLIANT" | "MISALIGNMENT_DETECTED";
+  frechet_distance_km: number;
+  compliance_threshold_km: number;
+  max_deviation: {
+    reference_point: [number, number];
+    inspection_point: [number, number];
+    deviation_km: number;
+  };
+  route_info: {
+    train_no: string;
+    train_name: string;
+    route_length_km: number;
+  };
+};
+
+type SearchResult = {
+  train_no: string;
+  train_name: string;
+  train_type: string | null;
+  station_count: number;
+  route_length_km: number;
+  origin: string;
+  destination: string;
 };
 
 type MatchedRoute = {
@@ -245,9 +284,25 @@ export default function MapCanvas() {
   const [cursorCoords, setCursorCoords] = useState({ lat: 26.2006, lon: 92.9376 });
   const [annotationLengthKm, setAnnotationLengthKm] = useState(0);
 
+  // Nearby popup state
+  const [nearbyPopup, setNearbyPopup] = useState<{ lat: number; lon: number } | null>(null);
+  const [nearbySegments, setNearbySegments] = useState<NearbySegment[]>([]);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+
+  // Alignment verification state
+  const [alignmentResult, setAlignmentResult] = useState<AlignmentResultData | null>(null);
+  const [alignmentLoading, setAlignmentLoading] = useState(false);
+  const [alignmentError, setAlignmentError] = useState<string | null>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+
   const lastPos = useRef<Point | null>(null);
   const strokesRef = useRef<Point[][]>([]);
   const currentStrokeRef = useRef<Point[] | null>(null);
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -408,6 +463,9 @@ export default function MapCanvas() {
     setActiveRouteLabel(null);
     setHoveredRouteLabel(null);
     setAnnotationLengthKm(0);
+    setAlignmentResult(null);
+    setAlignmentError(null);
+    setNearbyPopup(null);
   }, []);
 
   const updateCursorFromMouse = useCallback((e: React.MouseEvent) => {
@@ -418,6 +476,157 @@ export default function MapCanvas() {
     const y = clamp01((e.clientY - rect.top) / rect.height) * MAP_HEIGHT;
     const [lon, lat] = pixelToLonLat({ x, y }, MAP_WIDTH, MAP_HEIGHT);
     setCursorCoords({ lat, lon });
+  }, []);
+
+  // ── Click-to-Query: query nearby rail segments on map click ──────────────
+
+  const handleMapClick = useCallback((e: React.MouseEvent) => {
+    if (tool !== "pan") return;
+
+    // Use a timer to distinguish single click from drag
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+
+    const wrap = mapWrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const x = clamp01((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+    const y = clamp01((e.clientY - rect.top) / rect.height) * MAP_HEIGHT;
+    const [lon, lat] = pixelToLonLat({ x, y }, MAP_WIDTH, MAP_HEIGHT);
+
+    clickTimerRef.current = setTimeout(async () => {
+      setNearbyPopup({ lat, lon });
+      setNearbyLoading(true);
+      setNearbySegments([]);
+
+      try {
+        const res = await fetch(apiUrl(`/api/nearby-segments?lat=${lat}&lon=${lon}&radius=0.3&max=15`));
+        if (res.ok) {
+          const data = await res.json();
+          setNearbySegments(data.segments || []);
+        }
+      } catch {
+        // silently handle
+      } finally {
+        setNearbyLoading(false);
+      }
+    }, 200);
+  }, [tool]);
+
+  // ── Select a train from nearby popup to draw its route ───────────────────
+
+  const handleSelectNearbyTrain = useCallback(async (trainNo: string) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    try {
+      const res = await fetch(apiUrl(`/api/routes/${trainNo}?geometry=true`));
+      if (!res.ok) return;
+      const data = await res.json();
+      const route = data.route;
+      if (!route?.route_line?.length) return;
+
+      const projected = route.route_line
+        .filter((c: number[]) => Array.isArray(c) && c.length >= 2)
+        .map((c: number[]) => lonLatToPixel(c[0], c[1], canvas.width, canvas.height));
+
+      if (projected.length < 2) return;
+
+      const style = getRouteStyle(matchedRoutes.length);
+      const label = route.train_name
+        ? `${route.train_name} (${route.train_no})`
+        : `Train ${route.train_no}`;
+
+      setMatchedRoutes((prev) => [
+        ...prev,
+        {
+          label,
+          color: style.line,
+          glow: style.glow,
+          points: projected,
+          trainNo: route.train_no,
+          trainName: route.train_name,
+          routeLengthKm: route.route_length_km,
+          stationCount: route.station_count,
+          stations: route.stations,
+        },
+      ]);
+      setActiveRouteLabel(label);
+      setNearbyPopup(null);
+    } catch {
+      // silently handle
+    }
+  }, [matchedRoutes.length]);
+
+  // ── Verify Alignment against the active matched route ───────────────────
+
+  const verifyAlignment = useCallback(async () => {
+    if (!activeRoute?.trainNo) return;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const validStrokes = strokesRef.current.filter((s) => s.length >= 2);
+    if (!validStrokes.length) {
+      setAlignmentError("Draw a route on the map first, then verify alignment.");
+      return;
+    }
+
+    // Convert drawn strokes to [lon, lat] pairs
+    const coords = validStrokes.flatMap((stroke) =>
+      stroke.map((point) => pixelToLonLat(point, canvas.width, canvas.height))
+    );
+
+    setAlignmentLoading(true);
+    setAlignmentResult(null);
+    setAlignmentError(null);
+
+    try {
+      const res = await fetch(apiUrl("/api/verify-alignment"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          route_id: activeRoute.trainNo,
+          inspection_coordinates: coords,
+          compliance_threshold_km: 2.0,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        setAlignmentError(err.error || "Verification failed");
+        return;
+      }
+
+      const data = await res.json();
+      setAlignmentResult(data.result);
+    } catch {
+      setAlignmentError("Network error — could not reach the server.");
+    } finally {
+      setAlignmentLoading(false);
+    }
+  }, [activeRoute]);
+
+  // ── Search trains ───────────────────────────────────────────────────────
+
+  const handleSearch = useCallback(async (q: string) => {
+    setSearchQuery(q);
+    if (q.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    setSearchLoading(true);
+    try {
+      const res = await fetch(apiUrl(`/api/search-trains?q=${encodeURIComponent(q)}&max=8`));
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(data.results || []);
+      }
+    } catch {
+      // silently handle
+    } finally {
+      setSearchLoading(false);
+    }
   }, []);
 
   const projectRouteLineToPixels = useCallback((routeLine: number[][], width: number, height: number) => {
@@ -554,6 +763,40 @@ export default function MapCanvas() {
 
       <main className="flex-1 flex overflow-hidden">
         <aside className="w-[340px] bg-[#111827] border-r border-gray-800 flex flex-col z-10 shrink-0">
+          {/* Search Bar */}
+          <div className="p-4 border-b border-gray-800">
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder="Search trains by name or number…"
+                className="w-full bg-[#1f2937] border border-gray-700 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
+              />
+            </div>
+
+            {/* Search Results Dropdown */}
+            {searchResults.length > 0 && searchQuery.trim().length >= 2 && (
+              <div className="mt-2 border border-gray-700 rounded-xl bg-[#1a2332] overflow-hidden shadow-lg">
+                {searchResults.map((r) => (
+                  <button
+                    key={r.train_no}
+                    onClick={() => {
+                      handleSelectNearbyTrain(r.train_no);
+                      setSearchQuery("");
+                      setSearchResults([]);
+                    }}
+                    className="w-full text-left px-4 py-2.5 hover:bg-[#1f2937] border-b border-gray-800 last:border-0 transition-colors"
+                  >
+                    <p className="text-sm text-gray-200 truncate">{r.train_name}</p>
+                    <p className="text-[11px] text-gray-500">#{r.train_no} · {r.origin} → {r.destination}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="p-5 border-b border-gray-800">
             <h2 className="text-sm font-semibold text-gray-100">Routes Gallery</h2>
             <p className="text-xs text-gray-500 mt-1">BEST MATCHES ({matchedRoutes.length} Trains)</p>
@@ -562,7 +805,7 @@ export default function MapCanvas() {
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {matchedRoutes.length === 0 ? (
               <div className="text-xs text-gray-500 border border-dashed border-gray-700 rounded-xl p-4">
-                Draw on the map and click export to fetch best matches.
+                Draw on the map and click export to fetch best matches, or click the map to find nearby routes.
               </div>
             ) : (
               matchedRoutes.map((route, idx) => {
@@ -618,6 +861,7 @@ export default function MapCanvas() {
                     className="relative w-[min(90vw,900px)] max-w-full"
                     style={{ aspectRatio: `${MAP_WIDTH} / ${MAP_HEIGHT}` }}
                     onMouseMove={updateCursorFromMouse}
+                    onClick={handleMapClick}
                   >
                     <svg
                       width={MAP_WIDTH}
@@ -696,6 +940,26 @@ export default function MapCanvas() {
                   </div>
                 ) : null}
 
+                {/* Nearby Popup */}
+                {nearbyPopup && (
+                  <NearbyPopup
+                    lat={nearbyPopup.lat}
+                    lon={nearbyPopup.lon}
+                    segments={nearbySegments}
+                    loading={nearbyLoading}
+                    onClose={() => setNearbyPopup(null)}
+                    onSelectTrain={handleSelectNearbyTrain}
+                  />
+                )}
+
+                {/* Alignment Badge */}
+                <AlignmentBadge
+                  result={alignmentResult}
+                  loading={alignmentLoading}
+                  error={alignmentError}
+                  onClose={() => { setAlignmentResult(null); setAlignmentError(null); }}
+                />
+
                 <div className="absolute top-6 left-6 flex items-center gap-2 bg-[#111827]/90 backdrop-blur border border-gray-800 px-3 py-1.5 rounded-lg shadow-lg text-xs font-mono text-slate-400 z-30">
                   <Crosshair size={13} className="text-blue-500" />
                   <span>Lat: {cursorCoords.lat.toFixed(4)}°</span>
@@ -712,6 +976,9 @@ export default function MapCanvas() {
                   <IconButton icon={<Eraser size={18} />} tooltip="Eraser" active={tool === "eraser"} onClick={() => setTool("eraser")} />
                   <div className="w-px h-6 bg-gray-800 mx-1" />
                   <IconButton icon={<Download size={18} />} tooltip="Export Annotation" onClick={exportGeoJSON} />
+                  {activeRoute?.trainNo && (
+                    <IconButton icon={<ShieldCheck size={18} />} tooltip="Verify Alignment" onClick={verifyAlignment} />
+                  )}
                   <IconButton icon={<Layers size={18} />} tooltip="Clear" onClick={clearCanvas} />
                   <button
                     onClick={undo}

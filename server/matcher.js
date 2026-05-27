@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 
-const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), "data");
+const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), "runtime_data");
 const RAW_TRAINS_FILE = process.env.RAW_TRAINS_FILE || path.join(DATA_ROOT, "trains.json");
 const RAW_STATIONS_FILE = process.env.RAW_STATIONS_FILE || path.join(DATA_ROOT, "stations.json");
 const RAW_SCHEDULES_FILE = process.env.RAW_SCHEDULES_FILE || path.join(DATA_ROOT, "schedules.json");
@@ -441,4 +441,12 @@ export async function runMatch(annotationGeoJson) {
 
 export function clearRouteCache() {
   routesCache = null;
+}
+
+/**
+ * Return the loaded routes array (triggers load if not yet cached).
+ * Used by the MCP handler to share route data with the spatial index.
+ */
+export async function getRoutes() {
+  return loadRoutes();
 }

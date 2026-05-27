@@ -13,6 +13,7 @@ export default defineConfig(({ mode }) => ({
     },
     proxy: {
       "/api": "http://localhost:5050",
+      "/mcp": "http://localhost:5050",
     },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
