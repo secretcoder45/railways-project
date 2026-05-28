@@ -557,6 +557,16 @@ export default function MapCanvas() {
     }
   }, [matchedRoutes.length]);
 
+  const activeRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === activeRouteLabel) || matchedRoutes[0],
+    [matchedRoutes, activeRouteLabel]
+  );
+
+  const hoveredRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === hoveredRouteLabel) || null,
+    [matchedRoutes, hoveredRouteLabel]
+  );
+
   // ── Verify Alignment against the active matched route ───────────────────
 
   const verifyAlignment = useCallback(async () => {
@@ -628,16 +638,6 @@ export default function MapCanvas() {
       setSearchLoading(false);
     }
   }, []);
-
-  const activeRoute = useMemo(
-    () => matchedRoutes.find((r) => r.label === activeRouteLabel) || matchedRoutes[0],
-    [matchedRoutes, activeRouteLabel]
-  );
-
-  const hoveredRoute = useMemo(
-    () => matchedRoutes.find((r) => r.label === hoveredRouteLabel) || null,
-    [matchedRoutes, hoveredRouteLabel]
-  );
 
   const projectRouteLineToPixels = useCallback((routeLine: number[][], width: number, height: number) => {
     return routeLine
