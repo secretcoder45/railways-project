@@ -4,7 +4,7 @@ services:
     env: node
     plan: free
     buildCommand: npm ci
-    startCommand: node server/index.js
+    startCommand: node --max-old-space-size=450 server/index.js
     envVars:
       - key: NODE_VERSION
         value: 22
@@ -17,7 +17,7 @@ services:
       - key: RAW_SCHEDULES_FILE
         value: /opt/render/project/src/runtime_data/schedules.json
       - key: PREBUILT_ROUTES_FILE
-        value: /opt/render/project/src/runtime_data/prebuilt_routes.json
+        value: /opt/render/project/src/server/data/prebuilt_routes.json.gz
       - key: RAW_TRAINS_URL
         value: https://raw.githubusercontent.com/datameet/railways/master/trains.json
       - key: RAW_STATIONS_URL
