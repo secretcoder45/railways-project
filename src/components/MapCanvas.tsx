@@ -629,6 +629,16 @@ export default function MapCanvas() {
     }
   }, []);
 
+  const activeRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === activeRouteLabel) || matchedRoutes[0],
+    [matchedRoutes, activeRouteLabel]
+  );
+
+  const hoveredRoute = useMemo(
+    () => matchedRoutes.find((r) => r.label === hoveredRouteLabel) || null,
+    [matchedRoutes, hoveredRouteLabel]
+  );
+
   const projectRouteLineToPixels = useCallback((routeLine: number[][], width: number, height: number) => {
     return routeLine
       .filter((coord) => Array.isArray(coord) && coord.length >= 2)
@@ -729,15 +739,6 @@ export default function MapCanvas() {
     return [...matchedRoutes.filter((route) => route.label !== emphasis), active];
   }, [matchedRoutes, hoveredRouteLabel, activeRouteLabel]);
 
-  const activeRoute = useMemo(
-    () => matchedRoutes.find((r) => r.label === activeRouteLabel) || matchedRoutes[0],
-    [matchedRoutes, activeRouteLabel]
-  );
-
-  const hoveredRoute = useMemo(
-    () => matchedRoutes.find((r) => r.label === hoveredRouteLabel) || null,
-    [matchedRoutes, hoveredRouteLabel]
-  );
   const stopStations = (activeRoute?.stations || []).filter(isStoppingStation);
   const estDurationHours = estimateDurationHours(activeRoute?.stations || []);
   const trainType = inferTrainType(activeRoute?.trainName);
