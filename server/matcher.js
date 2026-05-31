@@ -15,8 +15,6 @@ const MAP_BOUNDS = {
 };
 
 const RESAMPLE_POINTS = 200;
-const LENGTH_RATIO_MIN = 0.3;
-const LENGTH_RATIO_MAX = 3.5;
 const BBOX_PAD = 0.05;
 const STROKE_MAX_PENALTY_WEIGHT = 0.15;
 
@@ -51,6 +49,29 @@ function euclidean(a, b) {
   const dx = a[0] - b[0];
   const dy = a[1] - b[1];
   return Math.sqrt(dx * dx + dy * dy);
+}
+
+function pointToSegmentPx(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return euclidean(p, a);
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq));
+  return euclidean(p, [a[0] + t * dx, a[1] + t * dy]);
+}
+
+// Average min perpendicular distance from each annotation point to the route
+// polyline — partial-match friendly (replaces end-to-end Fréchet distance).
+function projectionScorePx(annotation, route) {
+  let total = 0;
+  for (const p of annotation) {
+    let min = Infinity;
+    for (let i = 0; i < route.length - 1; i++) {
+      const d = pointToSegmentPx(p, route[i], route[i + 1]);
+      if (d < min) min = d;
+    }
+    total += min === Infinity ? euclidean(p, route[0]) : min;
+  }
+  return total / annotation.length;
 }
 
 function lineLength(points) {
@@ -117,25 +138,6 @@ function resampleLine(points, n) {
   return out;
 }
 
-function discreteFrechet(p, q) {
-  const n = p.length;
-  const m = q.length;
-  if (!n || !m) return Infinity;
-
-  const ca = Array.from({ length: n }, () => Array(m).fill(-1));
-
-  function c(i, j) {
-    if (ca[i][j] >= 0) return ca[i][j];
-    const d = euclidean(p[i], q[j]);
-    if (i === 0 && j === 0) ca[i][j] = d;
-    else if (i > 0 && j === 0) ca[i][j] = Math.max(c(i - 1, 0), d);
-    else if (i === 0 && j > 0) ca[i][j] = Math.max(c(0, j - 1), d);
-    else ca[i][j] = Math.max(Math.min(c(i - 1, j), c(i - 1, j - 1), c(i, j - 1)), d);
-    return ca[i][j];
-  }
-
-  return c(n - 1, m - 1);
-}
 
 function toPixelLine(line) {
   if (!Array.isArray(line)) return null;
@@ -389,15 +391,13 @@ export async function runMatch(annotationGeoJson) {
   const candidates = [];
 
   for (const route of routes) {
-    if (route.length_norm < annLen * LENGTH_RATIO_MIN) continue;
-    if (route.length_norm > annLen * LENGTH_RATIO_MAX) continue;
     if (!bboxIntersects(route.bbox_norm, annBox)) continue;
 
     let weighted = 0;
     let maxStrokeDistance = 0;
 
     for (let i = 0; i < annStrokes.length; i += 1) {
-      const d = discreteFrechet(annStrokes[i], route.sampled_norm_200);
+      const d = projectionScorePx(annStrokes[i], route.sampled_norm_200);
       weighted += d * strokeLengths[i];
       if (d > maxStrokeDistance) maxStrokeDistance = d;
     }

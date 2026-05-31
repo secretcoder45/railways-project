@@ -9,6 +9,7 @@ import RBush from "rbush";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { haversineKm, bboxFromCoords } from "./geo-utils.js";
+import { Trie } from "./trie.js";
 
 export class SpatialIndex {
   constructor() {
@@ -16,6 +17,9 @@ export class SpatialIndex {
     this.routes = [];
     this.routeBBoxes = [];
     this.loaded = false;
+    this.trainNoIndex = new Map(); // O(1) lookup by train_no
+    this.searchTrie = new Trie(20); // prefix trie for name/number autocomplete
+    this.stationIndex = new Map(); // code → {name, lat, lon} for all unique stations
   }
 
   /**
@@ -54,6 +58,7 @@ export class SpatialIndex {
 
     this.tree.load(items);
     this.loaded = true;
+    this._buildSearchIndex();
     console.log(`[spatial-index] R-tree built with ${items.length} entries ✓`);
   }
 
@@ -88,7 +93,68 @@ export class SpatialIndex {
 
     this.tree.load(items);
     this.loaded = true;
-    console.log(`[spatial-index] R-tree built with ${items.length} entries ✓`);
+    this._buildSearchIndex();
+    console.log(`[spatial-index] R-tree built with ${items.length} entries, trie nodes: ${this.searchTrie.nodeCount} ✓`);
+  }
+
+  /**
+   * Build trainNoIndex (HashMap) and searchTrie (Trie) over all loaded routes.
+   * Called once after routes are available — O(N × k) where k = avg name length.
+   */
+  _buildSearchIndex() {
+    for (const route of this.routes) {
+      this.trainNoIndex.set(route.train_no, route);
+      this.searchTrie.insert(route.train_name, route);
+      this.searchTrie.insert(route.train_no, route);
+      for (const s of route.stations || []) {
+        if (s.code && !this.stationIndex.has(s.code)) {
+          this.stationIndex.set(s.code, { name: s.name, lat: s.lat, lon: s.lon });
+        }
+      }
+    }
+    console.log(`[spatial-index] Station index: ${this.stationIndex.size} unique stations`);
+  }
+
+  /**
+   * Find all unique stations within radiusDeg of any point in annotationCoords.
+   * Uses bounding-box pre-filter then exact Haversine check — O(S) worst case
+   * where S = number of unique stations (~8,500).
+   *
+   * @param {[number,number][]} annotationCoords - [lon, lat] pairs
+   * @param {number} radiusDeg - Search radius in degrees (default 0.15 ≈ 17 km)
+   * @returns {{ code, name, lat, lon, distance_km }[]} sorted by distance
+   */
+  queryNearbyStations(annotationCoords, radiusDeg = 0.15) {
+    if (!this.loaded) throw new Error("SpatialIndex has not been loaded yet");
+    if (!annotationCoords || annotationCoords.length === 0) return [];
+
+    // Annotation bounding box for pre-filter
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    for (const [lon, lat] of annotationCoords) {
+      if (lon < minLon) minLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lon > maxLon) maxLon = lon;
+      if (lat > maxLat) maxLat = lat;
+    }
+    const bLon0 = minLon - radiusDeg, bLon1 = maxLon + radiusDeg;
+    const bLat0 = minLat - radiusDeg, bLat1 = maxLat + radiusDeg;
+    const radiusKm = radiusDeg * 111.32;
+
+    const results = [];
+    for (const [code, st] of this.stationIndex) {
+      if (st.lon < bLon0 || st.lon > bLon1 || st.lat < bLat0 || st.lat > bLat1) continue;
+      let minDist = Infinity;
+      for (const [lon, lat] of annotationCoords) {
+        const d = haversineKm([lon, lat], [st.lon, st.lat]);
+        if (d < minDist) minDist = d;
+      }
+      if (minDist <= radiusKm) {
+        results.push({ code, name: st.name, lat: st.lat, lon: st.lon,
+          distance_km: Math.round(minDist * 100) / 100 });
+      }
+    }
+    results.sort((a, b) => a.distance_km - b.distance_km);
+    return results;
   }
 
   /**
@@ -147,18 +213,26 @@ export class SpatialIndex {
 
   /**
    * Look up a single route by train number.
+   * O(1) HashMap lookup (replaced O(N) linear scan).
    * @param {string} trainNo
    * @returns {object|undefined}
    */
   getRouteById(trainNo) {
-    return this.routes.find((r) => r.train_no === trainNo);
+    return this.trainNoIndex.get(trainNo);
   }
 
   /**
-   * Search routes by name, number, or type.
+   * Search routes by name or number.
+   *
+   * Fast path: O(k) trie prefix lookup (k = query length). Handles the common
+   * case — autocomplete-style queries like "raj", "12301", "shatabdi".
+   *
+   * Fallback: O(N) substring scan for mid-word queries that don't match any
+   * prefix (e.g. querying "press" to find "RAJDHANI EXPRESS").
+   *
    * @param {string} query - Search string
    * @param {number} maxResults - Max results (default 20)
-   * @returns {object[]}
+   * @returns {object[]} Raw route objects
    */
   searchRoutes(query, maxResults = 20) {
     if (!this.loaded) throw new Error("SpatialIndex has not been loaded yet");
@@ -166,26 +240,22 @@ export class SpatialIndex {
     const q = query.toLowerCase().trim();
     if (!q) return [];
 
+    // Fast path: O(k) trie prefix match
+    const trieHits = this.searchTrie.search(q, maxResults);
+    if (trieHits.length > 0) return trieHits;
+
+    // Fallback: O(N) substring scan (mid-word queries)
     const results = [];
     for (const route of this.routes) {
-      const nameMatch = (route.train_name || "").toLowerCase().includes(q);
-      const noMatch = (route.train_no || "").toLowerCase().includes(q);
-      const typeMatch = (route.train_type || "").toLowerCase().includes(q);
-
-      if (nameMatch || noMatch || typeMatch) {
-        results.push({
-          train_no: route.train_no,
-          train_name: route.train_name,
-          train_type: route.train_type,
-          station_count: route.station_count,
-          route_length_km: Math.round(route.route_length_km * 100) / 100,
-          stations: route.stations,
-          route_line: route.route_line,
-        });
+      if (
+        (route.train_name || "").toLowerCase().includes(q) ||
+        (route.train_no || "").toLowerCase().includes(q) ||
+        (route.train_type || "").toLowerCase().includes(q)
+      ) {
+        results.push(route);
         if (results.length >= maxResults) break;
       }
     }
-
     return results;
   }
 

@@ -33,7 +33,7 @@ const sessions = new Map();
  * @param {string} annotationPath - Path to the saved annotation.geojson
  * @returns {McpServer}
  */
-function createMcpServer(spatialIndex, annotationPath) {
+function createMcpServer(spatialIndex, stationGraph, annotationPath) {
   const server = new McpServer({
     name: "railways-validation-engine",
     version: "1.0.0",
@@ -280,6 +280,53 @@ function createMcpServer(spatialIndex, annotationPath) {
     },
   );
 
+  // ── Tool 6: plan_journey ─────────────────────────────────────────────────
+
+  server.tool(
+    "plan_journey",
+    "Find the minimum-time rail journey between two Indian railway stations using Dijkstra's shortest path algorithm over a weighted station adjacency graph (8,500+ nodes, 400K+ edges). Returns the full path with train numbers, station names, and per-leg travel times.",
+    {
+      from_station_code: z.string().min(1).describe("Origin station code in uppercase (e.g. 'NDLS' for New Delhi, 'MAS' for Chennai Central, 'CSTM' for Mumbai CST)"),
+      to_station_code:   z.string().min(1).describe("Destination station code in uppercase (e.g. 'MAS', 'HWH', 'BCT')"),
+    },
+    async ({ from_station_code, to_station_code }) => {
+      const src = from_station_code.trim().toUpperCase();
+      const dst = to_station_code.trim().toUpperCase();
+      console.log(`[mcp] plan_journey(${src} → ${dst})`);
+
+      try {
+        if (stationGraph.meta.size === 0) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ error: "Station graph is still loading." }) }],
+            isError: true,
+          };
+        }
+
+        const journey = stationGraph.dijkstra(src, dst);
+        if (!journey) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              error: `No rail path found between ${src} and ${dst}.`,
+              hint: "Verify station codes are correct uppercase abbreviations (e.g. NDLS, MAS, HWH, BCT, PUNE).",
+            }) }],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(journey, null, 2) }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[mcp] ERROR: ${message}`);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+          isError: true,
+        };
+      }
+    },
+  );
+
   return server;
 }
 
@@ -292,7 +339,7 @@ function createMcpServer(spatialIndex, annotationPath) {
  * @param {import('./spatial-index.js').SpatialIndex} spatialIndex
  * @param {{ annotationPath: string, authToken?: string }} opts
  */
-export function setupMcpRoutes(app, spatialIndex, opts = {}) {
+export function setupMcpRoutes(app, spatialIndex, stationGraph, opts = {}) {
   const { annotationPath, authToken } = opts;
 
   // ── Optional auth middleware for /mcp ─────────────────────────────────────
@@ -323,7 +370,7 @@ export function setupMcpRoutes(app, spatialIndex, opts = {}) {
           sessionIdGenerator: () => randomUUID(),
         });
 
-        const server = createMcpServer(spatialIndex, annotationPath);
+        const server = createMcpServer(spatialIndex, stationGraph, annotationPath);
 
         transport.onclose = () => {
           const sid = transport.sessionId;

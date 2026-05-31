@@ -7,6 +7,8 @@ import { clearRouteCache, runMatch, getRoutes } from "./matcher.js";
 import { SpatialIndex } from "./spatial-index.js";
 import { verifyAlignment } from "./frechet.js";
 import { setupMcpRoutes } from "./mcp-handler.js";
+import { LRUCache } from "./lru-cache.js";
+import { StationGraph } from "./graph.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,6 +24,28 @@ const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 // ─── Shared Spatial Index ────────────────────────────────────────────────────
 
 const spatialIndex = new SpatialIndex();
+
+// LRU cache for route geometry responses — capacity 200 entries
+// Each entry: { trainNo }:{geometry} → serialised route result object
+const routeCache = new LRUCache(200);
+
+const stationGraph = new StationGraph();
+
+// Extract [lon, lat] coords from a GeoJSON annotation for geographic operations.
+function extractLonLatCoords(annotationGeoJson) {
+  const coords = [];
+  const fromGeom = (geom) => {
+    if (geom?.type === "LineString") coords.push(...(geom.coordinates || []));
+    if (geom?.type === "MultiLineString") {
+      for (const l of geom.coordinates || []) coords.push(...l);
+    }
+  };
+  if (annotationGeoJson?.type === "Feature") fromGeom(annotationGeoJson.geometry);
+  if (annotationGeoJson?.type === "FeatureCollection") {
+    for (const f of annotationGeoJson.features || []) fromGeom(f.geometry);
+  }
+  return coords;
+}
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
 
@@ -43,6 +67,9 @@ app.get("/api/health", (_req, res) => {
     service: "railways-matcher",
     mcp: spatialIndex.routeCount > 0 ? "ready" : "loading",
     routes: spatialIndex.routeCount,
+    stations: stationGraph.meta.size,
+    graph_edges: stationGraph.edgeCount,
+    route_cache: routeCache.stats(),
   });
 });
 
@@ -83,7 +110,14 @@ app.post("/api/match", async (req, res) => {
   try {
     const annotation = req.body?.annotation || req.body;
     const result = await runMatch(annotation);
-    return res.json({ ok: true, result });
+
+    // Station detection from geographic coordinates (if available in GeoJSON geometry)
+    const lonLatCoords = extractLonLatCoords(annotation);
+    const nearbyStations = lonLatCoords.length > 0 && spatialIndex.routeCount > 0
+      ? spatialIndex.queryNearbyStations(lonLatCoords, 0.15)
+      : [];
+
+    return res.json({ ok: true, result, nearby_stations: nearbyStations });
   } catch (err) {
     return res.status(400).json({ error: err.message || "Failed to match" });
   }
@@ -193,12 +227,18 @@ app.get("/api/routes/:trainNo", (req, res) => {
       return res.status(503).json({ error: "Spatial index is still loading." });
     }
 
-    const route = spatialIndex.getRouteById(req.params.trainNo);
-    if (!route) {
-      return res.status(404).json({ error: `Route not found: ${req.params.trainNo}` });
-    }
-
+    const trainNo = req.params.trainNo;
     const includeGeometry = req.query.geometry === "true";
+    const cacheKey = `${trainNo}:${includeGeometry}`;
+
+    // LRU cache hit — O(1), skip index lookup and object construction
+    const cached = routeCache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    const route = spatialIndex.getRouteById(trainNo); // O(1) HashMap lookup
+    if (!route) {
+      return res.status(404).json({ error: `Route not found: ${trainNo}` });
+    }
 
     const result = {
       train_no: route.train_no,
@@ -214,7 +254,9 @@ app.get("/api/routes/:trainNo", (req, res) => {
       result.coordinate_count = route.route_line.length;
     }
 
-    return res.json({ ok: true, route: result });
+    const response = { ok: true, route: result };
+    routeCache.put(cacheKey, response);
+    return res.json(response);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -245,7 +287,7 @@ app.get("/api/search-trains", (req, res) => {
       train_name: r.train_name,
       train_type: r.train_type,
       station_count: r.station_count,
-      route_length_km: r.route_length_km,
+      route_length_km: Math.round(r.route_length_km * 100) / 100,
       origin: r.stations?.[0]?.name || "Unknown",
       destination: r.stations?.[r.stations.length - 1]?.name || "Unknown",
     }));
@@ -256,9 +298,36 @@ app.get("/api/search-trains", (req, res) => {
   }
 });
 
+/**
+ * GET /api/journey?from=NDLS&to=MAS
+ * Dijkstra's shortest path (min travel time) between two station codes.
+ */
+app.get("/api/journey", (req, res) => {
+  try {
+    const from = String(req.query.from || "").trim().toUpperCase();
+    const to   = String(req.query.to   || "").trim().toUpperCase();
+
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to station codes are required (e.g. ?from=NDLS&to=MAS)" });
+    }
+    if (stationGraph.meta.size === 0) {
+      return res.status(503).json({ error: "Station graph is still loading. Try again in a moment." });
+    }
+
+    const journey = stationGraph.dijkstra(from, to);
+    if (!journey) {
+      return res.status(404).json({ error: `No rail path found between ${from} and ${to}. Check station codes.` });
+    }
+
+    return res.json({ ok: true, journey });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── MCP Endpoint Mount ──────────────────────────────────────────────────────
 
-setupMcpRoutes(app, spatialIndex, {
+setupMcpRoutes(app, spatialIndex, stationGraph, {
   annotationPath: OUTPUT_PATH,
   authToken: MCP_AUTH_TOKEN || undefined,
 });
@@ -274,6 +343,7 @@ app.listen(PORT, () => {
       console.log("[server] Loading routes for spatial index…");
       const routes = await getRoutes();
       spatialIndex.loadFromArray(routes);
+      stationGraph.build(routes);
       console.log(`[server] Spatial index ready: ${spatialIndex.routeCount} routes, MCP tools online ✓`);
     } catch (err) {
       console.error("[server] Failed to bootstrap spatial index:", err.message);

@@ -101,6 +101,50 @@ export function resampleLine(coords, n = 200) {
 }
 
 /**
+ * Perpendicular distance from point p to segment [a, b] in geographic space.
+ * Projects p onto the segment, clamps t to [0,1], returns Haversine distance
+ * to the clamped projection point.
+ *
+ * @param {[number,number]} p - Query point [lon, lat]
+ * @param {[number,number]} a - Segment start [lon, lat]
+ * @param {[number,number]} b - Segment end   [lon, lat]
+ * @returns {number} Distance in km
+ */
+export function pointToSegmentKm(p, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return haversineKm(p, a);
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq));
+  return haversineKm(p, [a[0] + t * dx, a[1] + t * dy]);
+}
+
+/**
+ * Average minimum perpendicular distance from each annotation point to the
+ * nearest segment of the route polyline.
+ *
+ * Unlike Fréchet distance this is partial-match friendly — a user who draws
+ * only part of a long route still gets a low (good) score.
+ *
+ * @param {[number,number][]} annotationCoords - [lon, lat] pairs
+ * @param {[number,number][]} routeCoords      - [lon, lat] pairs
+ * @returns {number} Average projection distance in km (lower = better match)
+ */
+export function projectionScoreKm(annotationCoords, routeCoords) {
+  if (!annotationCoords.length || !routeCoords.length) return Infinity;
+  let total = 0;
+  for (const p of annotationCoords) {
+    let min = Infinity;
+    for (let i = 0; i < routeCoords.length - 1; i++) {
+      const d = pointToSegmentKm(p, routeCoords[i], routeCoords[i + 1]);
+      if (d < min) min = d;
+    }
+    total += min === Infinity ? haversineKm(p, routeCoords[0]) : min;
+  }
+  return total / annotationCoords.length;
+}
+
+/**
  * Compute the axis-aligned bounding box of a set of coordinates.
  * @param {[number,number][]} coords - Array of [lon, lat]
  * @returns {{ minX: number, minY: number, maxX: number, maxY: number }}

@@ -9,8 +9,8 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "node --test server/lru-cache.test.js server/trie.test.js server/projection.test.js",
+    "test:watch": "node --test --watch server/lru-cache.test.js server/trie.test.js server/projection.test.js",
     "server": "node server/index.js",
     "build-routes": "node scripts/build-routes.mjs",
     "server:render": "node server/index.js"
