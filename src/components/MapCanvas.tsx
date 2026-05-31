@@ -284,6 +284,10 @@ export default function MapCanvas() {
   const [cursorCoords, setCursorCoords] = useState({ lat: 26.2006, lon: 92.9376 });
   const [annotationLengthKm, setAnnotationLengthKm] = useState(0);
 
+  // Match loading / error state
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchError, setMatchError] = useState<string | null>(null);
+
   // Nearby popup state
   const [nearbyPopup, setNearbyPopup] = useState<{ lat: number; lon: number } | null>(null);
   const [nearbySegments, setNearbySegments] = useState<NearbySegment[]>([]);
@@ -465,6 +469,7 @@ export default function MapCanvas() {
     setAnnotationLengthKm(0);
     setAlignmentResult(null);
     setAlignmentError(null);
+    setMatchError(null);
     setNearbyPopup(null);
   }, []);
 
@@ -650,7 +655,10 @@ export default function MapCanvas() {
     if (!canvas) return;
 
     const validStrokes = strokesRef.current.filter((stroke) => stroke.length >= 2);
-    if (!validStrokes.length) return;
+    if (!validStrokes.length) {
+      setMatchError("Draw a path on the map first, then click Match.");
+      return;
+    }
 
     const strokeCoords = validStrokes.map((stroke) =>
       stroke.map((point) => pixelToLonLat(point, canvas.width, canvas.height))
@@ -681,19 +689,31 @@ export default function MapCanvas() {
       })),
     };
 
+    setMatchLoading(true);
+    setMatchError(null);
+    setMatchedRoutes([]);
+
     try {
-      const saveRes = await fetch(apiUrl("/api/annotation"), {
+      // Call /api/match directly — no file save needed, works on cold starts
+      const matchRes = await fetch(apiUrl("/api/match"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(geojson),
       });
-      if (!saveRes.ok) return;
 
-      const matchRes = await fetch(apiUrl("/api/match-last"), { method: "POST" });
-      if (!matchRes.ok) return;
+      if (!matchRes.ok) {
+        const err = await matchRes.json().catch(() => ({}));
+        setMatchError(err.error || `Server error ${matchRes.status}. Try again.`);
+        return;
+      }
 
       const matchData = (await matchRes.json()) as MatchResponse;
       const bestMatches = matchData.result?.best ?? [];
+
+      if (bestMatches.length === 0) {
+        setMatchError("No matching routes found. Try drawing a longer or more precise path.");
+        return;
+      }
 
       const projectedRoutes: MatchedRoute[] = [];
       for (let i = 0; i < bestMatches.length; i += 1) {
@@ -707,7 +727,6 @@ export default function MapCanvas() {
         const name = route.train_name?.trim();
         const number = route.train_no?.trim();
         const label = name ? `${name}${number ? ` (${number})` : ""}` : number ? `Train ${number}` : `Match ${i + 1}`;
-
         const style = getRouteStyle(i);
 
         projectedRoutes.push({
@@ -726,8 +745,11 @@ export default function MapCanvas() {
 
       setMatchedRoutes(projectedRoutes);
       setHoveredRouteLabel(null);
-    } catch {
-      // keep silent by design
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setMatchError(`Could not reach the server. Is the backend online? (${msg})`);
+    } finally {
+      setMatchLoading(false);
     }
   }, [projectRouteLineToPixels]);
 
@@ -968,6 +990,32 @@ export default function MapCanvas() {
                   <span>Lon: {cursorCoords.lon.toFixed(4)}°</span>
                 </div>
 
+                {/* Match error / loading banner */}
+                {(matchError || matchLoading) && (
+                  <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-2xl border text-sm font-medium"
+                    style={{
+                      backgroundColor: matchLoading ? "rgba(17,24,39,0.97)" : "rgba(127,29,29,0.97)",
+                      borderColor: matchLoading ? "#334155" : "#991b1b",
+                      color: matchLoading ? "#94a3b8" : "#fca5a5",
+                    }}
+                  >
+                    {matchLoading ? (
+                      <>
+                        <svg className="animate-spin w-4 h-4 text-blue-400" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                        </svg>
+                        Matching route… this may take 30s on first load
+                      </>
+                    ) : (
+                      <>
+                        <span>{matchError}</span>
+                        <button onClick={() => setMatchError(null)} className="ml-2 text-red-300 hover:text-white">✕</button>
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-[#111827]/90 backdrop-blur border border-gray-800 p-2 rounded-2xl flex items-center gap-2 shadow-2xl z-30">
                   <IconButton icon={<ZoomIn size={18} />} tooltip="Zoom In" onClick={() => zoomIn()} />
                   <IconButton icon={<ZoomOut size={18} />} tooltip="Zoom Out" onClick={() => zoomOut()} />
@@ -976,7 +1024,14 @@ export default function MapCanvas() {
                   <IconButton icon={<PenLine size={18} />} tooltip="Draw Route" active={tool === "draw"} onClick={() => setTool("draw")} />
                   <IconButton icon={<Eraser size={18} />} tooltip="Eraser" active={tool === "eraser"} onClick={() => setTool("eraser")} />
                   <div className="w-px h-6 bg-gray-800 mx-1" />
-                  <IconButton icon={<Download size={18} />} tooltip="Export Annotation" onClick={exportGeoJSON} />
+                  <IconButton
+                    icon={matchLoading
+                      ? <svg className="animate-spin w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                      : <Download size={18} />}
+                    tooltip={matchLoading ? "Matching…" : "Match Route"}
+                    onClick={matchLoading ? undefined : exportGeoJSON}
+                    active={matchLoading}
+                  />
                   {activeRoute?.trainNo && (
                     <IconButton icon={<ShieldCheck size={18} />} tooltip="Verify Alignment" onClick={verifyAlignment} />
                   )}
