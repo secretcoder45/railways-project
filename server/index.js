@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 5050;
 const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), "runtime_data");
 const OUTPUT_PATH = process.env.ANNOTATION_PATH || path.join(DATA_ROOT, "annotation.geojson");
 const BUILD_SCRIPT = process.env.BUILD_SCRIPT || path.join(DATA_ROOT, "scripts", "build_datameet_routes.mjs");
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
+const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "*").replace(/\/+$/, "");
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 
 // ─── Shared Spatial Index ────────────────────────────────────────────────────
