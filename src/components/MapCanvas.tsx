@@ -747,7 +747,8 @@ export default function MapCanvas() {
       setHoveredRouteLabel(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setMatchError(`Could not reach the server. Is the backend online? (${msg})`);
+      const targetUrl = apiUrl("/api/match");
+      setMatchError(`Network error hitting ${targetUrl} — ${msg}. Check Vercel env var VITE_API_BASE_URL.`);
     } finally {
       setMatchLoading(false);
     }
