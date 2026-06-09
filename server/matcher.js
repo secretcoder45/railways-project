@@ -18,14 +18,21 @@ const RESAMPLE_POINTS = 200;
 const BBOX_PAD = 0.05;
 const STROKE_MAX_PENALTY_WEIGHT = 0.15;
 
-const MAX_RETURNED_ROUTES = 20;
-const SIMILARITY_MULTIPLIER = 1.22;
-const SIMILARITY_ABS_PAD = 0.025;
+const MAX_RETURNED_ROUTES = 10;
+const SIMILARITY_MULTIPLIER = 1.28;
+const SIMILARITY_ABS_PAD = 0.03;
 const DENSE_CORRIDOR_CANDIDATES = 1200;
 const MIN_RETURN_DEFAULT = 1;
 const MIN_RETURN_DENSE = 3;
-const EXPANDED_MULTIPLIER = 1.35;
-const EXPANDED_ABS_PAD = 0.05;
+const EXPANDED_MULTIPLIER = 1.50;
+const EXPANDED_ABS_PAD = 0.06;
+
+// ── Scoring quality parameters ────────────────────────────────────────────────
+const MIN_STATION_COUNT  = 4;    // discard trivially short routes (local halts)
+const PRIORITY_POWER     = 1.0;  // exponent on train-class divisor
+const DIR_ALIGN_POWER    = 1.8;  // how hard to penalise angular mismatch
+const DIR_HARD_CUTOFF    = 0.18; // routes > ~80° off from annotation are excluded
+const LENGTH_RATIO_SOFT  = 0.35; // route shorter than 35 % of annLen gets penalty
 
 let routesCache = null;
 
@@ -370,6 +377,63 @@ async function loadRoutes() {
   return routesCache;
 }
 
+// ── Train priority (higher = better class, divides the score) ─────────────────
+function getTrainPriority(name, type) {
+  const n = (name || "").toUpperCase();
+  const t = (type || "").toUpperCase();
+  if (
+    n.includes("RAJDHANI") || n.includes("SHATABDI") || n.includes("DURONTO") ||
+    n.includes("VANDE BHARAT") || n.includes("GATIMAAN") || n.includes("TEJAS") ||
+    n.includes("HUMSAFAR")
+  ) return 1.75;
+  if (
+    n.includes("SUPERFAST") || n.endsWith(" SF") || n.includes(" SF ") ||
+    t.includes("SUPERFAST")
+  ) return 1.35;
+  if (
+    n.includes("EXPRESS") || n.includes(" EXP") || t.includes("EXPRESS") ||
+    n.includes("MAIL")
+  ) return 1.10;
+  if (n.includes("PASSENGER") || n.includes(" PASS") || t.includes("PASSENGER")) return 0.52;
+  if (
+    n.includes("LOCAL") || n.includes("MEMU") || n.includes("DEMU") ||
+    n.includes("SHUTTLE") || n.includes("EMU")
+  ) return 0.42;
+  return 0.82; // unknown / miscellaneous
+}
+
+// ── Direction helpers ─────────────────────────────────────────────────────────
+
+// Unit vector from first to last point of a polyline — cheap approximation of
+// principal axis that is fast enough to run per-candidate.
+function principalDirection(points) {
+  if (!points || points.length < 2) return null;
+  const dx = points[points.length - 1][0] - points[0][0];
+  const dy = points[points.length - 1][1] - points[0][1];
+  const len = Math.sqrt(dx * dx + dy * dy);
+  return len < 1e-8 ? null : [dx / len, dy / len];
+}
+
+// Direction of the portion of a route that falls inside (or near) the bbox.
+// Clipping to the annotation region avoids "global direction" bias on long routes
+// (e.g. a Delhi→Mumbai route that only intersects a Delhi-area annotation).
+function directionInBbox(routePoints, minX, minY, maxX, maxY) {
+  const pad = Math.max(maxX - minX, maxY - minY) * 0.35;
+  const clipped = routePoints.filter(
+    ([x, y]) => x >= minX - pad && x <= maxX + pad && y >= minY - pad && y <= maxY + pad
+  );
+  return principalDirection(clipped.length >= 2 ? clipped : routePoints);
+}
+
+// ── Length-ratio penalty ──────────────────────────────────────────────────────
+// Only penalise routes shorter than the annotation — partial annotation matching
+// (user draws a sub-segment of a long route) is fine and must NOT be penalised.
+function getLengthPenalty(ratio) {
+  if (ratio >= LENGTH_RATIO_SOFT) return 1.0;
+  // Linear from 1.0 (at threshold) to 2.8 (at ratio = 0)
+  return 1.0 + (LENGTH_RATIO_SOFT - ratio) / LENGTH_RATIO_SOFT * 1.8;
+}
+
 export async function runMatch(annotationGeoJson) {
   const annStrokesRaw = parseAnnotation(annotationGeoJson);
   if (!annStrokesRaw.length) throw new Error("Annotation must contain at least one valid stroke");
@@ -387,29 +451,62 @@ export async function runMatch(annotationGeoJson) {
   const b = bbox(mergedPoints);
   const annBox = [b[0] - BBOX_PAD, b[1] - BBOX_PAD, b[2] + BBOX_PAD, b[3] + BBOX_PAD];
 
+  // Pre-compute annotation principal direction once for all candidates.
+  // Only filter by direction when the annotation is long enough to be reliable.
+  const annDirection   = principalDirection(mergedPoints);
+  const annDirReliable = annLen > 0.04; // at least ~4 % of normalised map width
+
   const routes = await loadRoutes();
   const candidates = [];
 
   for (const route of routes) {
     if (!bboxIntersects(route.bbox_norm, annBox)) continue;
 
+    // Discard trivially short routes (local halts, < 4 stations)
+    if (route.station_count < MIN_STATION_COUNT) continue;
+
+    // ── Raw geometric score ─────────────────────────────────────────────────
     let weighted = 0;
     let maxStrokeDistance = 0;
-
     for (let i = 0; i < annStrokes.length; i += 1) {
       const d = projectionScorePx(annStrokes[i], route.sampled_norm_200);
       weighted += d * strokeLengths[i];
       if (d > maxStrokeDistance) maxStrokeDistance = d;
     }
-
     const avgDistance = weighted / annLen;
-    const score = avgDistance + maxStrokeDistance * STROKE_MAX_PENALTY_WEIGHT;
+    const rawScore = avgDistance + maxStrokeDistance * STROKE_MAX_PENALTY_WEIGHT;
+
+    // ── Direction alignment ─────────────────────────────────────────────────
+    // Use only the route portion inside the annotation's bounding box so that
+    // a Delhi→Mumbai train matched on a Delhi annotation isn't penalised for
+    // the rest of the route heading south.
+    const routeDir = directionInBbox(route.sampled_norm_200, b[0], b[1], b[2], b[3]);
+    const dirScore = (annDirection && routeDir)
+      ? Math.abs(annDirection[0] * routeDir[0] + annDirection[1] * routeDir[1])
+      : 0.65; // conservative default when direction can't be determined
+
+    // Hard-exclude routes that are nearly perpendicular to the annotation
+    if (annDirReliable && dirScore < DIR_HARD_CUTOFF) continue;
+
+    // ── Length-ratio penalty ────────────────────────────────────────────────
+    const lengthPenalty = getLengthPenalty(route.length_norm / annLen);
+
+    // ── Train-class priority ────────────────────────────────────────────────
+    const priority = getTrainPriority(route.train_name, route.train_type);
+
+    // ── Combined adjusted score (lower = better) ────────────────────────────
+    // Dividing by priority rewards premium trains.
+    // Dividing by dirFactor^power heavily penalises angular mismatches.
+    const dirFactor = Math.max(DIR_HARD_CUTOFF, dirScore);
+    const adjustedScore =
+      (rawScore * lengthPenalty) /
+      (Math.pow(priority, PRIORITY_POWER) * Math.pow(dirFactor, DIR_ALIGN_POWER));
 
     candidates.push({
       train_no: route.train_no,
       train_name: route.train_name,
       train_type: route.train_type,
-      distance_px_norm: score,
+      distance_px_norm: adjustedScore,
       route_length_km: route.route_length_km,
       station_count: route.station_count,
       route_line: route.route_line,
