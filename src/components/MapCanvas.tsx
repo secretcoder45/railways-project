@@ -179,6 +179,28 @@ function getRouteStyle(index: number) {
   return { line: `hsl(${hue} 80% 58%)`, glow: `hsla(${hue} 90% 60% / 0.45)` };
 }
 
+// Segments longer than this threshold (in canvas px) are treated as gaps.
+// The route_line is built from station coordinates — distant stations without
+// intermediate GPS points produce straight-line artifacts we must skip.
+// 80px on a 1000px canvas ≈ 240 km; legitimate rail segments are shorter.
+const ROUTE_GAP_THRESHOLD_PX = 80;
+
+function routeToPathD(points: Point[]): string {
+  if (points.length < 2) return "";
+  let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 1; i < points.length; i++) {
+    const dx = points[i].x - points[i - 1].x;
+    const dy = points[i].y - points[i - 1].y;
+    if (Math.sqrt(dx * dx + dy * dy) > ROUTE_GAP_THRESHOLD_PX) {
+      // Jump without drawing — avoids straight-line artifacts across the map
+      d += ` M ${points[i].x.toFixed(1)} ${points[i].y.toFixed(1)}`;
+    } else {
+      d += ` L ${points[i].x.toFixed(1)} ${points[i].y.toFixed(1)}`;
+    }
+  }
+  return d;
+}
+
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
 }
@@ -917,14 +939,14 @@ export default function MapCanvas() {
                         return (
                           <g key={`route-${route.label}`} style={{ opacity }}>
                             {highlighted && (
-                              <polyline
-                                points={route.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                              <path
+                                d={routeToPathD(route.points)}
                                 fill="none" stroke={route.color}
                                 strokeWidth={strokeWidth + 6} strokeLinecap="round" strokeLinejoin="round" opacity="0.25"
                               />
                             )}
-                            <polyline
-                              points={route.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                            <path
+                              d={routeToPathD(route.points)}
                               fill="none" stroke={route.color}
                               strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"
                             />
